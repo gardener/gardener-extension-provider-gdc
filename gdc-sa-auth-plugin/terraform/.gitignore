@@ -1,0 +1,4 @@
+# ignore local terraform directory and file
+.terraform.lock.hcl
+.terraform/*
+terraform.tfstate*

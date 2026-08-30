@@ -1,0 +1,89 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+image:
+  repository: 10.200.9.2:10443/library/private-cloud-devel/gardener-extension-provider-gdch/extension-provider-image
+  tag: v1
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+maxUnavailable: 1
+maxSurge: 50%
+resources: {}
+metricsPort: 8080
+healthPort: 8081
+
+controllers:
+  backupentry:
+    concurrentSyncs: 5
+  backupbucket:
+    concurrentSyncs: 5
+  controlplane:
+    concurrentSyncs: 5
+  dnsrecord:
+    concurrentSyncs: 5
+  infrastructure:
+    concurrentSyncs: 5
+  worker:
+    concurrentSyncs: 5
+  ignoreOperationAnnotation: false
+
+disableControllers: []
+disableWebhooks:
+  - backupprovider
+ignoreResources: false
+
+webhookConfig:
+  servicePort: 443
+  serverPort: 10250
+
+# settings for metrics, e.g. scraping by seed-prometheus
+metrics:
+  enableScraping: true
+
+# setting for configmap.yaml
+config:
+  clientConnection:
+    acceptContentTypes: application/json
+    contentType: application/json
+    qps: 100
+    burst: 130
+  # etcd:
+  #   storage:
+  #     className: high-performance
+  #     capacity: 50Gi
+gardener:
+  version: ""
+  seed:
+    provider: gdch
+    spec:
+      settings:
+        topologyAwareRouting:
+          enabled: true
+  runtimeCluster:
+    enabled: false
+
+# imageVectorOverwrite: |
+#   images:
+#   - name: pause-container
+#     sourceRepository: github.com/kubernetes/kubernetes/blob/master/build/pause/Dockerfile
+#     repository: gcr.io/google_containers/pause-amd64
+#     tag: "3.0"
+#     version: 1.11.x
+#   - name: pause-container
+#     sourceRepository: github.com/kubernetes/kubernetes/blob/master/build/pause/Dockerfile
+#     repository: gcr.io/google_containers/pause-amd64
+#     tag: "3.1"
+#     version: ">= 1.12"
+#   ...

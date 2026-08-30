@@ -1,0 +1,65 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+infraClusterLabels: "csi-driver/cluster=tenant"
+topologyKey: "topology.kubernetes.io/zone"
+infraClusterNamespace:
+infraClusterkubeconfig:
+  zone1: infra-kubeconfig-0
+  zone2: infra-kubeconfig-1
+zones:
+  - zone1
+  - zone2
+
+images:
+  csi-driver: 10.200.9.2:10443/library/private-cloud-devel/gardener/kubevirt-csi-driver:v1
+  csi-provisioner: 10.200.9.2:10443/library/private-cloud-devel/gardener/origin-csi-external-provisioner:latest
+  csi-attacher: 10.200.9.2:10443/library/private-cloud-devel/gardener/origin-csi-external-attacher:latest
+  csi-liveness-probe: 10.200.9.2:10443/library/private-cloud-devel/gardener/origin-csi-livenessprobe:latest
+  csi-snapshotter:
+  csi-resizer:
+
+resources:
+  driver:
+    requests:
+      cpu: 10m
+      memory: 50Mi
+  provisioner:
+    requests:
+      cpu: 11m
+      memory: 32Mi
+  attacher:
+    requests:
+      cpu: 10m
+      memory: 50Mi
+  livenessProbe:
+    requests:
+      cpu: 10m
+      memory: 50Mi
+  snapshotter:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+  resizer:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+csiSnapshotController:
+  replicas: 1
+  podAnnotations: {}
+  resources:
+    requests:
+      cpu: 11m
+      memory: 32Mi
