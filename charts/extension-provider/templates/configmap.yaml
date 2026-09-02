@@ -1,0 +1,39 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "name" . }}-configmap
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "labels" . | indent 4 }}
+data:
+  config.yaml: |
+    ---
+    apiVersion: extensions.config.gardener.gdc.goog/v1alpha1
+    kind: ControllerConfiguration
+{{- if .Values.config }}
+{{- if .Values.config.clientConnection }}
+    clientConnection:
+      acceptContentTypes: {{ required ".Values.config.clientConnection.acceptContentTypes is required" .Values.config.clientConnection.acceptContentTypes }}
+      contentType: {{ required ".Values.config.clientConnection.contentType is required" .Values.config.clientConnection.contentType }}
+      qps: {{ required ".Values.config.clientConnection.qps is required" .Values.config.clientConnection.qps }}
+      burst: {{ required ".Values.config.clientConnection.burst is required" .Values.config.clientConnection.burst }}
+{{- end }}
+{{- if .Values.config.etcd }}
+    etcd:
+{{ toYaml .Values.config.etcd | indent 6 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,56 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+virtualGarden:
+  enabled: false
+  user:
+    name: ""
+image:
+  repository: 10.200.9.2:10443/library/private-cloud-devel/gardener-extension-provider-gdch/admission-gdch
+  tag: v1
+  pullPolicy: IfNotPresent
+replicaCount: 1
+resources: {}
+metricsPort: 8080
+healthPort: 8081
+vpa:
+  enabled: true
+  resourcePolicy:
+    minAllowed:
+      memory: 64Mi
+  updatePolicy:
+    updateMode: "Auto"
+webhookConfig:
+  serverPort: 10250
+# Kubeconfig to the target cluster. In-cluster configuration will be used if not specified.
+kubeconfig:
+
+# projectedKubeconfig:
+#   baseMountPath: /var/run/secrets/gardener.cloud
+#   genericKubeconfigSecretName: generic-token-kubeconfig
+#   tokenSecretName: access-gdch-admission
+
+service:
+  topologyAwareRouting:
+    enabled: false
+
+gardener:
+  virtualCluster:
+    enabled: true
+    serviceAccount: {}
+#     name: extension-admission-provider-gdch
+#     namespace: kube-system
+  runtimeCluster: {}
+#   priorityClassName: gardener-garden-system-400

@@ -1,0 +1,287 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- $hasMultiZoneSupport := .Values.zones }}
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: kubevirt-csi-controller
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: kubevirt-csi-driver
+    role: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubevirt-csi-driver
+      role: controller
+  template:
+    metadata:
+      labels:
+        app: kubevirt-csi-driver
+        role: controller
+        gardener.cloud/role: controlplane
+        networking.gardener.cloud/to-dns: allowed
+        networking.gardener.cloud/to-private-networks: allowed
+        networking.gardener.cloud/to-public-networks: allowed
+        networking.resources.gardener.cloud/to-kube-apiserver-tcp-443: allowed
+    spec:
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: csi-driver
+          imagePullPolicy: IfNotPresent
+          image: {{ index $.Values.images "csi-driver" }}
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--infra-cluster-namespace=$(INFRACLUSTER_NAMESPACE)"
+            - "--infra-cluster-labels=$(INFRACLUSTER_LABELS)"
+            {{- if $hasMultiZoneSupport }}
+            - "--infra-cluster-kubeconfig-dir=/var/run/secrets/infra-cluster-kubeconfig"
+            - "--topology-key={{ .Values.topologyKey }}"
+            - "--volume-topology-values={{ join "," .Values.zones }}"
+            {{- else }}
+            - "--infra-cluster-kubeconfig=/var/run/secrets/infra-cluster-kubeconfig/kubeconfig"
+            {{- end }}
+            - "--tenant-cluster-kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
+            - "--run-node-service=false"
+            - "--run-controller-service=true"
+            - "--v=5"
+{{- if $.Values.resources.driver }}
+          resources:
+{{ toYaml $.Values.resources.driver | indent 10 }}
+{{- end }}
+          ports:
+            - name: healthz
+              containerPort: 10301
+              protocol: TCP
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
+            - name: INFRACLUSTER_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: kvcsi-driver-config
+                  key: infraClusterNamespace
+            - name: INFRACLUSTER_LABELS
+              valueFrom:
+                configMapKeyRef:
+                  name: kvcsi-driver-config
+                  key: infraClusterLabels
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+            - mountPath: /var/run/secrets/infra-cluster-kubeconfig
+              name: infra-cluster-kubeconfig
+            - mountPath: /var/run/secrets/gardener.cloud/shoot/generic-kubeconfig
+              name: kubeconfig-csi-driver
+              readOnly: true
+        - name: csi-provisioner
+          imagePullPolicy: IfNotPresent
+          image:  {{ index $.Values.images "csi-provisioner" }}
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=5"
+            - "--timeout=3m"
+            - "--kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
+            - "--retry-interval-max=1m"
+            - "--extra-create-metadata"
+            {{- if $hasMultiZoneSupport }}
+            - "--feature-gates=Topology=true"
+            {{- end }}
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+            - mountPath: /var/run/secrets/gardener.cloud/shoot/generic-kubeconfig
+              name: kubeconfig-csi-provisioner
+              readOnly: true
+{{- if $.Values.resources.provisioner }}
+          resources:
+{{ toYaml $.Values.resources.provisioner | indent 10 }}
+{{- end }}
+        - name: csi-attacher
+          imagePullPolicy: IfNotPresent
+          image: {{ index $.Values.images "csi-attacher" }}
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=5"
+            - "--timeout=3m"
+            - "--kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
+            - "--retry-interval-max=1m"
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+            - mountPath: /var/run/secrets/gardener.cloud/shoot/generic-kubeconfig
+              name: kubeconfig-csi-attacher
+              readOnly: true
+{{- if $.Values.resources.attacher }}
+          resources:
+{{ toYaml $.Values.resources.attacher | indent 10 }}
+{{- end }}
+        - name: csi-snapshotter
+          image: {{ index $.Values.images "csi-snapshotter" }}
+          imagePullPolicy: IfNotPresent
+          args:
+          - --csi-address=$(CSI_ENDPOINT)
+          - --kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig
+          - --leader-election
+          - --leader-election-namespace=kube-system
+          - --snapshot-name-prefix=snapshot
+          securityContext:
+            allowPrivilegeEscalation: false
+          env:
+          - name: CSI_ENDPOINT
+            value: /var/lib/csi/sockets/pluginproxy/csi.sock
+{{- if $.Values.resources.snapshotter }}
+          resources:
+{{ toYaml $.Values.resources.snapshotter | indent 10 }}
+{{- end }}
+          volumeMounts:
+          - name: socket-dir
+            mountPath: /var/lib/csi/sockets/pluginproxy/
+          - mountPath: /var/run/secrets/gardener.cloud/shoot/generic-kubeconfig
+            name: kubeconfig-csi-snapshotter
+            readOnly: true
+        - name: csi-resizer
+          image: {{ index .Values.images "csi-resizer" }}
+          imagePullPolicy: IfNotPresent
+          args:
+          - "--csi-address=$(ADDRESS)"
+          - "--timeout=300s"
+          - "--kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
+          - "--v=5"
+          securityContext:
+            allowPrivilegeEscalation: false
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+{{- if .Values.resources.resizer }}
+          resources:
+{{ toYaml .Values.resources.resizer | indent 10 }}
+{{- end }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+            - mountPath: /var/run/secrets/gardener.cloud/shoot/generic-kubeconfig
+              name: kubeconfig-csi-resizer
+              readOnly: true
+        - name: csi-liveness-probe
+          imagePullPolicy: IfNotPresent
+          image: {{ index $.Values.images "csi-liveness-probe" }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--probe-timeout=3s"
+            - "--health-port=10301"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+{{- if $.Values.resources.livenessProbe }}
+          resources:
+{{ toYaml $.Values.resources.livenessProbe | indent 10 }}
+{{- end }}
+      volumes:
+      - emptyDir: {}
+        name: socket-dir
+      - configMap:
+          name: kvcsi-driver-config
+        name: kvcsi-driver-config
+      - name: infra-cluster-kubeconfig
+        secret:
+          secretName: infra-cluster-kubeconfig
+      - name: kubeconfig-csi-attacher
+        projected:
+          defaultMode: 420
+          sources:
+            - secret:
+                items:
+                  - key: kubeconfig
+                    path: kubeconfig
+                name: {{ $.Values.global.genericTokenKubeconfigSecretName }}
+                optional: false
+            - secret:
+                items:
+                  - key: token
+                    path: token
+                name: shoot-access-csi-attacher
+                optional: false
+      - name: kubeconfig-csi-provisioner
+        projected:
+          defaultMode: 420
+          sources:
+            - secret:
+                items:
+                  - key: kubeconfig
+                    path: kubeconfig
+                name: {{ $.Values.global.genericTokenKubeconfigSecretName }}
+                optional: false
+            - secret:
+                items:
+                  - key: token
+                    path: token
+                name: shoot-access-csi-provisioner
+                optional: false
+      - name: kubeconfig-csi-snapshotter
+        projected:
+          defaultMode: 420
+          sources:
+            - secret:
+                items:
+                  - key: kubeconfig
+                    path: kubeconfig
+                name: {{ $.Values.global.genericTokenKubeconfigSecretName }}
+                optional: false
+            - secret:
+                items:
+                  - key: token
+                    path: token
+                name: shoot-access-csi-snapshotter
+                optional: false
+      - name: kubeconfig-csi-driver
+        projected:
+          defaultMode: 420
+          sources:
+            - secret:
+                items:
+                  - key: kubeconfig
+                    path: kubeconfig
+                name: {{ $.Values.global.genericTokenKubeconfigSecretName }}
+                optional: false
+            - secret:
+                items:
+                  - key: token
+                    path: token
+                name: shoot-access-csi-driver
+                optional: false
+      - name: kubeconfig-csi-resizer
+        projected:
+          defaultMode: 420
+          sources:
+            - secret:
+                items:
+                  - key: kubeconfig
+                    path: kubeconfig
+                name: {{ $.Values.global.genericTokenKubeconfigSecretName }}
+                optional: false
+            - secret:
+                items:
+                  - key: token
+                    path: token
+                name: shoot-access-csi-resizer
+                optional: false

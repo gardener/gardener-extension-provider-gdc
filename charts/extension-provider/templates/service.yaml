@@ -1,0 +1,48 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "name" . }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    networking.resources.gardener.cloud/from-world-to-ports: '[{"protocol":"TCP","port":{{ .Values.webhookConfig.serverPort }}}]'
+    networking.resources.gardener.cloud/from-all-seed-scrape-targets-allowed-ports: '[{"port":{{ .Values.metricsPort }},"protocol":"TCP"}]'
+    networking.resources.gardener.cloud/from-all-webhook-targets-allowed-ports: '[{"protocol":"TCP","port":{{ .Values.webhookConfig.serverPort }}}]'
+    networking.resources.gardener.cloud/namespace-selectors: '[{"matchLabels":{"kubernetes.io/metadata.name":"garden"}},{"matchLabels":{"gardener.cloud/role":"shoot"}}]'
+    networking.resources.gardener.cloud/pod-label-selector-namespace-alias: extensions
+{{-  if .Values.ignoreResources }}
+    resources.gardener.cloud/ignore: "true"
+{{- end }}
+{{- if .Values.gardener.seed.spec.settings.topologyAwareRouting.enabled }}
+{{- if semverCompare ">= 1.27-0" .Capabilities.KubeVersion.Version }}
+    service.kubernetes.io/topology-mode: "auto"
+{{- else }}
+    service.kubernetes.io/topology-aware-hints: "auto"
+{{- end }}
+{{- end }}
+  labels:
+{{ include "labels" . | indent 4 }}
+{{- if .Values.gardener.seed.spec.settings.topologyAwareRouting.enabled }}
+    endpoint-slice-hints.resources.gardener.cloud/consider: "true"
+{{- end }}
+spec:
+  type: ClusterIP
+  selector:
+{{ include "labels" . | indent 6 }}
+  ports:
+  - port: {{ .Values.webhookConfig.servicePort }}
+    protocol: TCP
+    targetPort: {{ .Values.webhookConfig.serverPort }}
