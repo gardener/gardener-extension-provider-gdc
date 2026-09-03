@@ -1,0 +1,73 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- range $index, $machineClass := .Values.machineClasses }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $machineClass.name }}
+  namespace: {{ $.Release.Namespace }}
+{{- if $machineClass.resourceLabels }}
+  labels:
+{{ toYaml $machineClass.resourceLabels | indent 4 }}
+{{- end }}
+type: Opaque
+data:
+  userData: {{ $machineClass.secret.cloudConfig | b64enc }}
+---
+apiVersion: machine.sapcloud.io/v1alpha1
+kind: MachineClass
+metadata:
+  name: {{ $machineClass.name }}
+  namespace: {{ $.Release.Namespace }}
+{{- if $machineClass.nodeTemplate }}
+nodeTemplate:
+  capacity:
+{{ toYaml $machineClass.nodeTemplate.capacity | indent 4 }}
+{{- if $machineClass.nodeTemplate.virtualCapacity }}
+  virtualCapacity:
+{{ toYaml $machineClass.nodeTemplate.virtualCapacity | indent 4 }}
+{{- end }}
+  instanceType: {{ $machineClass.nodeTemplate.instanceType }}
+  region: {{ $machineClass.nodeTemplate.region }}
+  zone: {{ $machineClass.nodeTemplate.zone }}
+{{- end }}
+providerSpec:
+  addressPoolName: {{ $machineClass.addressPoolName }}
+  subnetName: {{ $machineClass.subnetName }}
+  project: {{ $machineClass.project }}
+  orgClusterURL: {{$machineClass.orgClusterURL}}
+  registryURL: {{$machineClass.registryURL}}
+  caData: {{$machineClass.caData}}
+  enableEgress: {{$machineClass.enableEgress}}
+  disks:
+{{ toYaml $machineClass.disks | indent 2 }}
+{{- if $machineClass.labels }}
+  labels:
+{{ toYaml $machineClass.labels | indent 4 }}
+{{- end }}
+  machineType: {{ $machineClass.machineType }}
+{{- if $machineClass.annotations }}
+  annotations:
+{{ toYaml $machineClass.annotations | indent 2 }}
+{{- end }}
+secretRef:
+  name: {{ $machineClass.name }}
+  namespace: {{ $.Release.Namespace }}
+credentialsSecretRef:
+  name: {{ $machineClass.credentialsSecretRef.name }}
+  namespace: {{ $machineClass.credentialsSecretRef.namespace }}
+provider: "GDCH"
+{{- end }}

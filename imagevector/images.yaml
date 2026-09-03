@@ -1,0 +1,36 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+images:
+- name: cloud-controller-manager
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/cloud-controller-manager
+  tag: v1
+- name: machine-controller-manager-provider-gdch
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/machine-controller-manager
+  tag: v1
+- name: csi-driver
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/csi-driver
+  tag: v1
+- name: csi-provisioner
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-external-provisioner
+  tag: v1
+- name: csi-attacher
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-external-attacher
+  tag: v1
+- name: csi-liveness-probe
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-livenessprobe
+  tag: v1
+- name: csi-node-driver-registrar
+  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-node-driver-registrar
+  tag: v1

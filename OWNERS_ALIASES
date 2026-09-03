@@ -1,0 +1,13 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+aliases:
+  gardener-extension-provider-gdc-reviewers:
+  - AndreasBurger
+  - dilipkumar2k6
+  - HophinKibona
+  - fuzzdota
+  gardener-extension-provider-gdc-approvers:
+  - AndreasBurger
+  - dilipkumar2k6
+  - HophinKibona
+  - fuzzdota

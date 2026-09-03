@@ -1,0 +1,17 @@
+# Binaries and build artifacts
+bin/
+.tools/
+*.tgz
+
+# Backups and temporary files
+*.orig
+*.sw[pq]
+.DS_Store
+
+# Editor and IDE paraphernalia
+.idea
+.vscode
+
+# Test and vendor artifacts
+vendor
+/testlist

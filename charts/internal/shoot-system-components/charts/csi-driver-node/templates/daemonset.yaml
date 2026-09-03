@@ -1,0 +1,156 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: csi-driver-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    node.gardener.cloud/critical-component: "true"
+    app: kubevirt-csi-driver
+spec:
+  selector:
+    matchLabels:
+      app: kubevirt-csi-driver
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        node.gardener.cloud/wait-for-csi-node-gdch: {{ include "csi-driver-node.provisioner" . }}
+      labels:
+        node.gardener.cloud/critical-component: "true"
+        app: kubevirt-csi-driver
+    spec:
+      hostNetwork: true
+      serviceAccount: kubevirt-csi-node-sa
+      priorityClassName: system-node-critical
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      containers:
+        - name: csi-driver
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+          imagePullPolicy: IfNotPresent
+          image: {{ index .Values.images "csi-driver" }}
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - "--node-name=$(KUBE_NODE_NAME)"
+            - "--run-node-service=true"
+            - "--topology-key={{ .Values.topologyKey }}"
+            - "--run-controller-service=false"
+            - "--v=5"
+          env:
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CSI_ENDPOINT
+              value: unix:{{ .Values.socketPath }}
+{{- if .Values.resources.driver }}
+          resources:
+{{ toYaml .Values.resources.driver | indent 12 }}
+{{- end }}
+          volumeMounts:
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: "Bidirectional"
+            - name: plugin-dir
+              mountPath: /csi
+            - name: device-dir
+              mountPath: /dev
+            - name: udev
+              mountPath: /run/udev
+            - name: sys
+              mountPath: /sys
+          ports:
+            - name: healthz
+              containerPort: 10300
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
+        - name: csi-node-driver-registrar
+          image: {{ index .Values.images "csi-node-driver-registrar" }}
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+            - "--v=5"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "rm -rf /registration/csi.kubevirt.io-reg.sock /csi/csi.sock"]
+          env:
+            - name: ADDRESS
+              value: {{ .Values.socketPath }}
+            - name: DRIVER_REG_SOCK_PATH
+              value: /var/lib/kubelet/plugins/csi.kubevirt.io/csi.sock
+{{- if .Values.resources.nodeDriverRegistrar }}
+          resources:
+{{ toYaml .Values.resources.nodeDriverRegistrar | indent 12 }}
+{{- end }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: csi-liveness-probe
+          image: {{ index .Values.images "csi-liveness-probe" }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--probe-timeout=3s"
+            - "--health-port=10300"
+{{- if .Values.resources.livenessProbe }}
+          resources:
+{{ toYaml .Values.resources.livenessProbe | indent 12 }}
+{{- end }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+      volumes:
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.kubevirt.io/
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry/
+            type: Directory
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: udev
+          hostPath:
+            path: /run/udev
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory

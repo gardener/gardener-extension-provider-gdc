@@ -1,0 +1,8 @@
+# ignore generated key json file
+*.json
+
+# ignore ca certs
+*.crt
+
+# ignore generated kubeconfig
+*kubeconfig*
