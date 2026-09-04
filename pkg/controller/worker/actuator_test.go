@@ -170,6 +170,7 @@ func Test_workerDelegate_DeployMachineDeployments_Lancer(t *testing.T) {
 			want: []worker.MachineDeployment{
 				{
 					Name:                 "test-worker-ns-test-worker-1",
+					PoolName:             "test-worker",
 					ClassName:            "test-worker-ns-test-worker-1-401ed",
 					SecretName:           "test-worker-ns-test-worker-1-401ed",
 					Minimum:              1,
@@ -189,6 +190,7 @@ func Test_workerDelegate_DeployMachineDeployments_Lancer(t *testing.T) {
 				},
 				{
 					Name:                 "test-worker-ns-test-worker-2",
+					PoolName:             "test-worker",
 					ClassName:            "test-worker-ns-test-worker-2-c8fd5",
 					SecretName:           "test-worker-ns-test-worker-2-c8fd5",
 					Minimum:              0,
