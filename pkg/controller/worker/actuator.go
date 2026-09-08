@@ -319,6 +319,7 @@ func (w *workerDelegate) generateMachineDeployments(ctx context.Context) error {
 
 			deployment := worker.MachineDeployment{
 				Name:                 deploymentName,
+				PoolName:             pool.Name,
 				ClassName:            className,
 				SecretName:           className,
 				Minimum:              worker.DistributeOverZones(zoneIdx, pool.Minimum, zoneLen),
