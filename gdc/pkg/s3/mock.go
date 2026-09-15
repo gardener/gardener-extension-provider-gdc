@@ -27,6 +27,7 @@ type MockObjectVersion struct {
 	Data         []byte
 	IsLatest     bool
 	LastModified *time.Time
+	VersionID    *string
 }
 
 type MockBucket struct {
@@ -57,6 +58,24 @@ func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
 	return objects, nil
 }
 
+func (m *mockClient) ListObjectVersionsPages(bucketFQN string) ([]ObjectVersion, error) {
+	bucket, ok := m.buckets[bucketFQN]
+	if !ok {
+		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
+	}
+
+	var objectVersions []ObjectVersion
+	for objectKey, object := range bucket.Objects {
+		for _, version := range object.Versions {
+			objectVersions = append(objectVersions, ObjectVersion{
+				ObjectKey: objectKey,
+				VersionID: version.VersionID,
+			})
+		}
+	}
+	return objectVersions, nil
+}
+
 func (m *mockClient) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error) {
 	// Call the custom function if provided
 	if m.DeleteObjectFunc != nil {
@@ -68,7 +87,25 @@ func (m *mockClient) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput,
 		return nil, fmt.Errorf("no such bucket %q", input.BucketFqn)
 	}
 
-	delete(bucket.Objects, input.ObjectKey)
+	object, ok := bucket.Objects[input.ObjectKey]
+	if !ok {
+		return nil, nil
+	}
+	if input.VersionId == nil {
+		delete(bucket.Objects, input.ObjectKey)
+		return nil, nil
+	}
+
+	remainingVersions := object.Versions[:0]
+	for _, version := range object.Versions {
+		if version.VersionID == nil || *version.VersionID != *input.VersionId {
+			remainingVersions = append(remainingVersions, version)
+		}
+	}
+	object.Versions = remainingVersions
+	if len(object.Versions) == 0 {
+		delete(bucket.Objects, input.ObjectKey)
+	}
 	return nil, nil
 }
 

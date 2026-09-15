@@ -83,8 +83,16 @@ type DeleteObjectOutput struct {
 	VersionId *string
 }
 
+// ObjectVersion identifies one object version or delete marker in a bucket.
+// A nil VersionID represents an object in a bucket without versioning enabled.
+type ObjectVersion struct {
+	ObjectKey string
+	VersionID *string
+}
+
 type Client interface {
 	ListObjectsV2Pages(bucketFQN string) ([]string, error)
+	ListObjectVersionsPages(bucketFQN string) ([]ObjectVersion, error)
 	DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error)
 	UploadObject(input UploadObjectInput) (*UploadObjectOutput, error)
 	GetObject(input GetObjectInput, opts ...GetObjectOption) (*GetObjectOutput, error)
@@ -164,6 +172,35 @@ func (s3Client *s3Client) ListObjectsV2Pages(bucketFQN string) ([]string, error)
 	}
 
 	return objectKeys, nil
+}
+
+// ListObjectVersionsPages lists all object versions and delete markers in a bucket.
+// Both must be removed before a versioned bucket can be deleted.
+func (s3Client *s3Client) ListObjectVersionsPages(bucketFQN string) ([]ObjectVersion, error) {
+	var objectVersions []ObjectVersion
+	input := &s3.ListObjectVersionsInput{Bucket: &bucketFQN}
+	err := s3Client.s3API.ListObjectVersionsPages(
+		input,
+		func(page *s3.ListObjectVersionsOutput, _ bool) bool {
+			for _, version := range page.Versions {
+				objectVersions = append(objectVersions, ObjectVersion{
+					ObjectKey: aws.StringValue(version.Key),
+					VersionID: version.VersionId,
+				})
+			}
+			for _, marker := range page.DeleteMarkers {
+				objectVersions = append(objectVersions, ObjectVersion{
+					ObjectKey: aws.StringValue(marker.Key),
+					VersionID: marker.VersionId,
+				})
+			}
+			return true
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	return objectVersions, nil
 }
 
 func (s3Client *s3Client) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error) {
