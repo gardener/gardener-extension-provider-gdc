@@ -29,6 +29,8 @@ spec:
       role: controller
   template:
     metadata:
+      annotations:
+        checksum/secret-infra-cluster-kubeconfig: {{ include (print $.Template.BasePath "/infra-cluster-kubeconfig.yaml") . | sha256sum }}
       labels:
         app: kubevirt-csi-driver
         role: controller
