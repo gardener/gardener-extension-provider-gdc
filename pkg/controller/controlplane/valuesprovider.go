@@ -144,6 +144,7 @@ var (
 				Objects: []*chart.Object{
 					{Type: &appsv1.Deployment{}, Name: gdc.CSIControllerName},
 					{Type: &corev1.ConfigMap{}, Name: gdc.CSIControllerConfigName},
+					{Type: &corev1.ConfigMap{}, Name: gdc.CSIControllerAnnotationsAllowlistConfigName},
 					{Type: &appsv1.Deployment{}, Name: gdc.CSISnapshotControllerName},
 					{Type: &corev1.ConfigMap{}, Name: gdc.InfraClusterKubeconfigName},
 				},
