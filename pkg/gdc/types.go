@@ -91,6 +91,9 @@ const (
 	// CSIControllerConfigName is the name of the CSI controller config in the seed.
 	CSIControllerConfigName = "kvcsi-driver-config"
 
+	// CSIControllerAnnotationsAllowlistConfigName is the name of the CSI controller annotations allowlist ConfigMap in the seed.
+	CSIControllerAnnotationsAllowlistConfigName = "kvcsi-annotations-allowlist"
+
 	// InfraClusterKubeconfigName is the name of the config for the kubeconfig to infra cluster.
 	InfraClusterKubeconfigName = "infra-cluster-kubeconfigs"
 

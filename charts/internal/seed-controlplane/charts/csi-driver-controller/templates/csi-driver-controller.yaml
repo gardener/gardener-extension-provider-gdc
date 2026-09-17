@@ -59,6 +59,7 @@ spec:
             - "--tenant-cluster-kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
             - "--run-node-service=false"
             - "--run-controller-service=true"
+            - "--annotations-allowlist-path=/etc/annotations/allowlist"
             - "--v=5"
 {{- if $.Values.resources.driver }}
           resources:
@@ -89,6 +90,8 @@ spec:
             - mountPath: /var/run/secrets/gardener.cloud/shoot/generic-kubeconfig
               name: kubeconfig-csi-driver
               readOnly: true
+            - name: annotations-allowlist
+              mountPath: /etc/annotations
         - name: csi-provisioner
           imagePullPolicy: IfNotPresent
           image:  {{ index $.Values.images "csi-provisioner" }}
@@ -204,6 +207,9 @@ spec:
       - configMap:
           name: kvcsi-driver-config
         name: kvcsi-driver-config
+      - name: annotations-allowlist
+        configMap:
+          name: kvcsi-annotations-allowlist
       - name: infra-cluster-kubeconfig
         secret:
           secretName: infra-cluster-kubeconfig
