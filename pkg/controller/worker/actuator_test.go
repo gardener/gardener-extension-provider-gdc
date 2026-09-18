@@ -1436,7 +1436,8 @@ func createInfrastructureProviderStatus(isLancer bool, enableEgress *bool) *runt
 		infraStatus = apisgdc.InfrastructureStatus{
 			EnableEgress: enableEgress,
 			Networks: apisgdc.NetworkStatus{
-				NodeCIDR: "192.168.0.0/16",
+				NodeAddressPoolClaim: "test-addresspoolclaim",
+				NodeCIDR:             "192.168.0.0/16",
 			},
 		}
 	}
