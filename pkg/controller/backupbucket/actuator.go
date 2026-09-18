@@ -272,7 +272,7 @@ func (a *actuator) deleteBucketObjects(ctx context.Context, bucketObject client.
 			ObjectKey: version.ObjectKey,
 			VersionId: version.VersionID,
 		}); err != nil {
-			return fmt.Errorf("failed to delete object %q version %v: %w", version.ObjectKey, version.VersionID, err)
+			return fmt.Errorf("failed to delete object %q version %q: %w", version.ObjectKey, ptr.Deref(version.VersionID, ""), err)
 		}
 	}
 
