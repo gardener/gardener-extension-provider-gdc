@@ -14,6 +14,8 @@ IMAGE_REPOSITORY_ADMISSION        := $(REGISTRY)/gardener-extension-admission-gd
 IMAGE_REPOSITORY_AUTH_PLUGIN      := $(REGISTRY)/gdch-sa-auth-plugin
 VERSION                           ?= v0.1.0-dev
 IMAGE_TAG                         ?= $(VERSION)
+TARGET_PLATFORMS                  ?=
+DOCKER_PLATFORM_ARGS              := $(if $(TARGET_PLATFORMS),--platform=$(TARGET_PLATFORMS),)
 
 #########################################
 # Tools                                 #
@@ -119,9 +121,9 @@ unittests: $(GINKGO)
 
 .PHONY: docker-images
 docker-images:
-	@docker build -t $(IMAGE_REPOSITORY_PROVIDER):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-provider-gdch .
-	@docker build -t $(IMAGE_REPOSITORY_ADMISSION):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-admission-gdch .
-	@docker build -t $(IMAGE_REPOSITORY_AUTH_PLUGIN):$(IMAGE_TAG) -f Dockerfile --target gdch-sa-auth-plugin .
+	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_PROVIDER):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-provider-gdch .
+	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_ADMISSION):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-admission-gdch .
+	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_AUTH_PLUGIN):$(IMAGE_TAG) -f Dockerfile --target gdch-sa-auth-plugin .
 
 .PHONY: help
 help: ## Display available targets
@@ -134,6 +136,6 @@ help: ## Display available targets
 	@echo "  make unittests     - Alias for test"
 	@echo "  make build-local   - Builds binaries locally in current environment"
 	@echo "  make release       - Builds cross-compiled release binaries"
-	@echo "  make docker-images - Builds multi-stage Docker images for provider and admission"
+	@echo "  make docker-images - Builds multi-stage Docker images (TARGET_PLATFORMS=linux/amd64)"
 	@echo "  make tidy          - Runs go mod tidy"
 	@echo "  make clean         - Cleans built binaries and tools cache"
