@@ -467,6 +467,7 @@ func Convert_gdc_NetworkConfig_To_v1alpha1_NetworkConfig(in *gdc.NetworkConfig, 
 }
 
 func autoConvert_v1alpha1_NetworkStatus_To_gdc_NetworkStatus(in *NetworkStatus, out *gdc.NetworkStatus, s conversion.Scope) error {
+	out.NodeAddressPoolClaim = in.NodeAddressPoolClaim
 	out.NodeCIDR = in.NodeCIDR
 	out.NodeSubnet = in.NodeSubnet
 	out.Zones = *(*[]gdc.Zones)(unsafe.Pointer(&in.Zones))
@@ -479,6 +480,7 @@ func Convert_v1alpha1_NetworkStatus_To_gdc_NetworkStatus(in *NetworkStatus, out 
 }
 
 func autoConvert_gdc_NetworkStatus_To_v1alpha1_NetworkStatus(in *gdc.NetworkStatus, out *NetworkStatus, s conversion.Scope) error {
+	out.NodeAddressPoolClaim = in.NodeAddressPoolClaim
 	out.NodeCIDR = in.NodeCIDR
 	out.NodeSubnet = in.NodeSubnet
 	out.Zones = *(*[]Zones)(unsafe.Pointer(&in.Zones))

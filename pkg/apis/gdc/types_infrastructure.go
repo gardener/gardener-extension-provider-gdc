@@ -112,6 +112,9 @@ type InfrastructureStatus struct {
 // +kubebuilder:object:generate=true
 // NetworkStatus is the current status of the infrastructure networks.
 type NetworkStatus struct {
+	// NodeAddressPoolClaim is the IP Pool for given shoot's VM nodes
+	NodeAddressPoolClaim string `json:"nodeAddressPoolClaim"`
+
 	// NodeCIDR are the CIDR range for the nodes.
 	NodeCIDR string `json:"nodeCIDR"`
 
