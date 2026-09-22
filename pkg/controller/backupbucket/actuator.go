@@ -51,7 +51,6 @@ import (
 const (
 	generatedSecretNamespace = "garden"
 	bucketDescription        = "storage for etcd backups"
-	defaultRetentionDays     = int32(1)
 )
 
 func getGeneratedSecretName(bucketName string) string {
@@ -123,7 +122,7 @@ func (a *actuator) Reconcile(ctx context.Context, _ logr.Logger, backupBucket *e
 }
 
 func (a *actuator) reconcileZonalBucket(ctx context.Context, backupBucket *extensionsv1alpha1.BackupBucket, bucketClient *backupBucketClientConfig) error {
-	if err := createZonalBucketIfNotExists(ctx, backupBucket.Name, bucketClient.orgClient, bucketClient.serviceAccount); err != nil {
+	if err := createZonalBucketIfNotExists(ctx, a.decoder, backupBucket.Name, backupBucket.Spec.ProviderConfig, bucketClient.orgClient, bucketClient.serviceAccount); err != nil {
 		return err
 	}
 
@@ -426,8 +425,27 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 	return nil
 }
 
+// getLockingPolicy computes the initial object LockingPolicy to be set when creating a bucket.
+// Note that DefaultObjectRetentionDays is immutable in Gardener (enforced by the Seed admission validator),
+// and createBucketIfNotExists only sets the policy at bucket creation time without overwriting external updates.
+func getLockingPolicy(config *apisgdc.BackupBucketConfig) (*objectv1.LockingPolicy, error) {
+	retentionDays := apisgdc.DefaultObjectRetentionDays
+	if config != nil && config.DefaultObjectRetentionDays != nil {
+		if *config.DefaultObjectRetentionDays < 0 || *config.DefaultObjectRetentionDays > apisgdc.MaxObjectRetentionDays {
+			return nil, fmt.Errorf("defaultObjectRetentionDays must be between 0 and %d, got %d", apisgdc.MaxObjectRetentionDays, *config.DefaultObjectRetentionDays)
+		}
+		retentionDays = *config.DefaultObjectRetentionDays
+	}
+	if retentionDays == 0 {
+		return nil, nil
+	}
+	return &objectv1.LockingPolicy{
+		DefaultObjectRetentionDays: ptr.To(retentionDays),
+	}, nil
+}
+
 // createZonalBucketIfNotExists ignore if bucket already exist otherwise create it.
-func createZonalBucketIfNotExists(ctx context.Context, bucketName string, orgClient client.Client, serviceAccount *auth.ServiceAccount) error {
+func createZonalBucketIfNotExists(ctx context.Context, decoder runtime.Decoder, bucketName string, providerConfig *runtime.RawExtension, orgClient client.Client, serviceAccount *auth.ServiceAccount) error {
 	bucket := &objectv1.Bucket{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      bucketName,
@@ -436,22 +454,13 @@ func createZonalBucketIfNotExists(ctx context.Context, bucketName string, orgCli
 		Spec: objectv1.BucketSpec{
 			Description:  bucketDescription,
 			StorageClass: objectv1.Standard,
-			BucketPolicy: &objectv1.BucketPolicy{
-				LockingPolicy: &objectv1.LockingPolicy{
-					DefaultObjectRetentionDays: ptr.To(defaultRetentionDays),
-				},
-			},
 		},
 	}
-	return createBucketIfNotExists(ctx, orgClient, bucket)
+	return createBucketIfNotExists(ctx, decoder, providerConfig, orgClient, bucket)
 }
 
 // createDualZoneBucketIfNotExists ignore if bucket already exist otherwise create it.
 func createDualZoneBucketIfNotExists(ctx context.Context, decoder runtime.Decoder, bucketName string, providerConfig *runtime.RawExtension, orgClient client.Client, serviceAccount *auth.ServiceAccount) error {
-	backupBucketConfig, err := validator.DecodeBackupBucketConfig(decoder, providerConfig)
-	if err != nil {
-		return fmt.Errorf("failed to decode BackupBucketConfig for backup bucket %s: %w", bucketName, err)
-	}
 	bucket := &globalv1.Bucket{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      bucketName,
@@ -459,20 +468,47 @@ func createDualZoneBucketIfNotExists(ctx context.Context, decoder runtime.Decode
 		},
 		Spec: globalv1.BucketSpec{
 			Description:  bucketDescription,
-			Location:     backupBucketConfig.DualZoneBucketLocation,
 			StorageClass: objectv1.Standard,
-			BucketPolicy: &objectv1.GlobalBucketPolicy{
-				LockingPolicy: &objectv1.LockingPolicy{
-					DefaultObjectRetentionDays: ptr.To(defaultRetentionDays),
-				},
-			},
 		},
 	}
-	return createBucketIfNotExists(ctx, orgClient, bucket)
+	return createBucketIfNotExists(ctx, decoder, providerConfig, orgClient, bucket)
 }
 
-// createBucketIfNotExists is a generic helper that creates a bucket if it does not already exist.
-func createBucketIfNotExists(ctx context.Context, orgClient client.Client, bucketObject client.Object) error {
+// createBucketIfNotExists is a generic helper that configures and creates a bucket if it does not already exist.
+func createBucketIfNotExists(ctx context.Context, decoder runtime.Decoder, providerConfig *runtime.RawExtension, orgClient client.Client, bucketObject client.Object) error {
+	var backupBucketConfig *apisgdc.BackupBucketConfig
+	if providerConfig != nil {
+		var err error
+		backupBucketConfig, err = validator.DecodeBackupBucketConfig(decoder, providerConfig)
+		if err != nil {
+			return fmt.Errorf("failed to decode BackupBucketConfig for backup bucket %s: %w", bucketObject.GetName(), err)
+		}
+	}
+
+	lockingPolicy, err := getLockingPolicy(backupBucketConfig)
+	if err != nil {
+		return err
+	}
+
+	switch b := bucketObject.(type) {
+	case *objectv1.Bucket:
+		if lockingPolicy != nil {
+			b.Spec.BucketPolicy = &objectv1.BucketPolicy{
+				LockingPolicy: lockingPolicy,
+			}
+		}
+	case *globalv1.Bucket:
+		if backupBucketConfig == nil {
+			return fmt.Errorf("backupBucketConfig is required for dual-zone bucket %s", bucketObject.GetName())
+		}
+		b.Spec.Location = backupBucketConfig.DualZoneBucketLocation
+		if lockingPolicy != nil {
+			b.Spec.BucketPolicy = &objectv1.GlobalBucketPolicy{
+				LockingPolicy: lockingPolicy,
+			}
+		}
+	}
+
 	if err := orgClient.Create(ctx, bucketObject); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			klog.Infof("bucket %s of type %T already exists in namespace %s. ", bucketObject.GetName(), bucketObject, bucketObject.GetNamespace())

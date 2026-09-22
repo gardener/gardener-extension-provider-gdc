@@ -22,6 +22,7 @@ import (
 	"github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -354,6 +355,237 @@ func TestBackupBucketValidator(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "Create new seed with valid positive DefaultObjectRetentionDays",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(7)),
+						})},
+					},
+				},
+			},
+			oldObj:  nil,
+			wantErr: false,
+		},
+		{
+			name: "Create new seed with DefaultObjectRetentionDays set to 0 (disabled)",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(0)),
+						})},
+					},
+				},
+			},
+			oldObj:  nil,
+			wantErr: false,
+		},
+		{
+			name: "Create new seed with negative DefaultObjectRetentionDays",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(-1)),
+						})},
+					},
+				},
+			},
+			oldObj:  nil,
+			wantErr: true,
+		},
+		{
+			name: "Create new seed with DefaultObjectRetentionDays set to maximum 36500",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(36500)),
+						})},
+					},
+				},
+			},
+			oldObj:  nil,
+			wantErr: false,
+		},
+		{
+			name: "Create new seed with DefaultObjectRetentionDays exceeding maximum 36500",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(36501)),
+						})},
+					},
+				},
+			},
+			oldObj:  nil,
+			wantErr: true,
+		},
+		{
+			name: "Update seed changing DefaultObjectRetentionDays without override annotation should fail",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(14)),
+						})},
+					},
+				},
+			},
+			oldObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(7)),
+						})},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Update seed changing DefaultObjectRetentionDays with override annotation should succeed",
+			newObj: &core.Seed{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{overrideAnnotation: "true"},
+				},
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(14)),
+						})},
+					},
+				},
+			},
+			oldObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(7)),
+						})},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Update seed changing DefaultObjectRetentionDays from nil (default 1) to 7 without override annotation should fail",
+			newObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(7)),
+						})},
+					},
+				},
+			},
+			oldObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: nil,
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Update seed changing DefaultObjectRetentionDays from nil (default 1) to 7 with override annotation should succeed",
+			newObj: &core.Seed{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{overrideAnnotation: "true"},
+				},
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(7)),
+						})},
+					},
+				},
+			},
+			oldObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: nil,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Update seed from nil to explicit DefaultObjectRetentionDays=1 (same effective retention) with override annotation should succeed",
+			newObj: &core.Seed{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{overrideAnnotation: "true"},
+				},
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: &runtime.RawExtension{Raw: encode(&apisgdc.BackupBucketConfig{
+							TypeMeta: metav1.TypeMeta{
+								APIVersion: apisgdc.SchemeGroupVersion.String(),
+								Kind:       "BackupBucketConfig",
+							},
+							DefaultObjectRetentionDays: ptr.To(int32(1)),
+						})},
+					},
+				},
+			},
+			oldObj: &core.Seed{
+				Spec: core.SeedSpec{
+					Backup: &core.Backup{
+						ProviderConfig: nil,
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 

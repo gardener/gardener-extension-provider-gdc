@@ -23,6 +23,10 @@ const (
 	// ChecksumWhenRequired indicates checksum will be calculated or validated
 	// if required by the operation.
 	ChecksumWhenRequired = "WHEN_REQUIRED"
+	// DefaultObjectRetentionDays is the default object retention period in days when DefaultObjectRetentionDays is unset.
+	DefaultObjectRetentionDays = int32(1)
+	// MaxObjectRetentionDays is the maximum object retention period in days supported by GDC LockingPolicy.
+	MaxObjectRetentionDays = int32(36500)
 )
 
 // BackupBucketConfig contains backup bucket specific configuration that is embedded into Gardener's `BackupBucket`
@@ -45,4 +49,20 @@ type BackupBucketConfig struct {
 	// Supported values are: "WHEN_REQUIRED", "WHEN_SUPPORTED".
 	// +optional
 	ResponseChecksumValidation string `json:"responseChecksumValidation,omitempty"`
+
+	// DefaultObjectRetentionDays specifies the minimum number of days that each version of every object will be retained,
+	// preventing deleting or modifying the bucket's objects for the specified minimum time period after upload.
+	// - Unspecified: Defaults to 1 day.
+	// - Set to 0: Disables the object retention at creation.
+	// - Set to 1..36500: Retains each version of every object for the specified number of days.
+	//
+	// Note on lifecycle and immutability:
+	// - This field is immutable in Gardener: the extension provider applies this value only when initially
+	//   creating the bucket (create-if-not-exists), and any attempt to modify it on an existing Seed is rejected
+	//   with an error by the admission validator (unless the override annotation is set).
+	// - GDC retention policies cannot be deleted or shortened once set; the retention period can only be increased.
+	// - If defaultObjectRetentionDays is increased externally (e.g., via GDC Console UI or API),
+	//   the extension provider will not overwrite or revert the externally updated value.
+	// +optional
+	DefaultObjectRetentionDays *int32 `json:"defaultObjectRetentionDays,omitempty"`
 }
