@@ -199,6 +199,11 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 			return fmt.Errorf("failed to delete bucket %q: %w", backupBucket.Name, err)
 		}
 	}
+	if err := bucketClient.orgClient.Get(ctx, client.ObjectKeyFromObject(bucketToDelete), bucketToDelete); err == nil {
+		return errors.DetermineError(fmt.Errorf("RetryableError: bucket %q is still being deleted", backupBucket.Name))
+	} else if !apierrors.IsNotFound(err) {
+		return errors.DetermineError(fmt.Errorf("failed to verify deletion of bucket %q: %w", backupBucket.Name, err))
+	}
 
 	secretName := getGeneratedSecretName(backupBucket.Name)
 	secret := &corev1.Secret{
@@ -262,18 +267,8 @@ func (a *actuator) deleteBucketObjects(ctx context.Context, bucketObject client.
 		return fmt.Errorf("failed to create S3 client: %w", err)
 	}
 
-	versions, err := storageClient.ListObjectVersionsPages(fullyQualifiedName)
-	if err != nil {
-		return fmt.Errorf("failed to list object versions: %w", err)
-	}
-	for _, version := range versions {
-		if _, err := storageClient.DeleteObject(s3.DeleteObjectInput{
-			BucketFqn: fullyQualifiedName,
-			ObjectKey: version.ObjectKey,
-			VersionId: version.VersionID,
-		}); err != nil {
-			return fmt.Errorf("failed to delete object %q version %q: %w", version.ObjectKey, ptr.Deref(version.VersionID, ""), err)
-		}
+	if err := storageClient.DeleteObjectVersionsWithPrefix(ctx, fullyQualifiedName, ""); err != nil {
+		return fmt.Errorf("failed to delete object versions: %w", err)
 	}
 
 	return nil

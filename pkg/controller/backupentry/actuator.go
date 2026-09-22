@@ -154,19 +154,8 @@ func (a *actuator) deleteObjectsWithPrefix(ctx context.Context, bucketName strin
 		return fmt.Errorf("failed to create s3Client, %w", err)
 	}
 	bucketFQN := bucketStorageClient.bucket.FullyQualifiedName
-	objects, err := bucketStorageClient.s3Client.ListObjectsV2Pages(bucketFQN)
-	if err != nil {
-		return fmt.Errorf("failed to list objects in bucket %s, %w", bucketName, err)
-	}
-	for _, object := range objects {
-		if strings.HasPrefix(object, prefix) {
-			_, err := bucketStorageClient.s3Client.DeleteObject(s3.DeleteObjectInput{BucketFqn: bucketFQN, ObjectKey: object})
-			if err != nil {
-				klog.Errorf("failed to delete object %s from bucket %s, %v", object, bucketFQN, err)
-				return fmt.Errorf("failed to delete object %s, %w", object, err)
-			}
-			klog.Infof("Deleted object %s from bucket %s", object, bucketFQN)
-		}
+	if err := bucketStorageClient.s3Client.DeleteObjectVersionsWithPrefix(ctx, bucketFQN, prefix); err != nil {
+		return fmt.Errorf("failed to delete object versions with prefix %q from bucket %s: %w", prefix, bucketName, err)
 	}
 	return nil
 }

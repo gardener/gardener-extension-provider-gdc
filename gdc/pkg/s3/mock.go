@@ -15,7 +15,9 @@
 package s3
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -35,18 +37,20 @@ type MockBucket struct {
 }
 
 type MockS3ClientConfig struct {
-	Buckets          map[string]*MockBucket
-	DeleteObjectFunc func(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	Buckets                            map[string]*MockBucket
+	DeleteObjectFunc                   func(context.Context, DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteObjectVersionsWithPrefixFunc func(context.Context, string, string) error
 }
 
 type mockClient struct {
 	buckets map[string]*MockBucket
 
 	// Assignable function field for customizing DeleteObject behavior
-	DeleteObjectFunc func(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteObjectFunc                   func(context.Context, DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteObjectVersionsWithPrefixFunc func(context.Context, string, string) error
 }
 
-func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
+func (m *mockClient) ListObjectsV2Pages(_ context.Context, bucketFQN string) ([]string, error) {
 	bucket, ok := m.buckets[bucketFQN]
 	if !ok {
 		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
@@ -58,7 +62,7 @@ func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
 	return objects, nil
 }
 
-func (m *mockClient) ListObjectVersionsPages(bucketFQN string) ([]ObjectVersion, error) {
+func (m *mockClient) ListObjectVersionsPages(_ context.Context, bucketFQN string) ([]ObjectVersion, error) {
 	bucket, ok := m.buckets[bucketFQN]
 	if !ok {
 		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
@@ -76,10 +80,34 @@ func (m *mockClient) ListObjectVersionsPages(bucketFQN string) ([]ObjectVersion,
 	return objectVersions, nil
 }
 
-func (m *mockClient) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error) {
+func (m *mockClient) DeleteObjectVersionsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
+	if m.DeleteObjectVersionsWithPrefixFunc != nil {
+		return m.DeleteObjectVersionsWithPrefixFunc(ctx, bucketFQN, prefix)
+	}
+
+	versions, err := m.ListObjectVersionsPages(ctx, bucketFQN)
+	if err != nil {
+		return err
+	}
+	for _, version := range versions {
+		if !strings.HasPrefix(version.ObjectKey, prefix) {
+			continue
+		}
+		if _, err := m.DeleteObject(ctx, DeleteObjectInput{
+			BucketFqn: bucketFQN,
+			ObjectKey: version.ObjectKey,
+			VersionId: version.VersionID,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *mockClient) DeleteObject(ctx context.Context, input DeleteObjectInput) (*DeleteObjectOutput, error) {
 	// Call the custom function if provided
 	if m.DeleteObjectFunc != nil {
-		return m.DeleteObjectFunc(input)
+		return m.DeleteObjectFunc(ctx, input)
 	}
 
 	bucket, ok := m.buckets[input.BucketFqn]
@@ -132,5 +160,9 @@ func (m *mockClient) UploadObject(input UploadObjectInput) (*UploadObjectOutput,
 }
 
 func CreateMockS3Client(config MockS3ClientConfig) Client {
-	return &mockClient{buckets: config.Buckets, DeleteObjectFunc: config.DeleteObjectFunc}
+	return &mockClient{
+		buckets:                            config.Buckets,
+		DeleteObjectFunc:                   config.DeleteObjectFunc,
+		DeleteObjectVersionsWithPrefixFunc: config.DeleteObjectVersionsWithPrefixFunc,
+	}
 }
