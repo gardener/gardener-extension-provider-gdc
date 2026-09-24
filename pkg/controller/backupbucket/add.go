@@ -16,11 +16,14 @@ package backupbucket
 
 import (
 	"context"
+	"time"
 
 	"github.com/gardener/gardener/extensions/pkg/controller/backupbucket"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/gdc"
 )
@@ -28,6 +31,11 @@ import (
 var (
 	// DefaultAddOptions are the default AddOptions for AddToManager.
 	DefaultAddOptions = AddOptions{}
+)
+
+const (
+	backupBucketRetryBaseDelay = time.Second
+	backupBucketRetryMaxDelay  = 15 * time.Minute
 )
 
 // AddOptions are options to apply when adding the GDCH backupbucket controller to the manager.
@@ -43,6 +51,10 @@ type AddOptions struct {
 // AddToManagerWithOptions adds a controller with the given Options to the given manager.
 // The opts.Reconciler is being set with a newly instantiated actuator.
 func AddToManagerWithOptions(ctx context.Context, mgr manager.Manager, opts AddOptions) error {
+	if opts.Controller.RateLimiter == nil {
+		opts.Controller.RateLimiter = workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](backupBucketRetryBaseDelay, backupBucketRetryMaxDelay)
+	}
+
 	return backupbucket.Add(mgr, backupbucket.AddArgs{
 		Actuator:          newActuator(mgr),
 		ControllerOptions: opts.Controller,

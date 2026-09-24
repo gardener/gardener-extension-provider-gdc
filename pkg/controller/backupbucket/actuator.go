@@ -40,6 +40,7 @@ import (
 
 	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/auth"
 	gdcclient "github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/client"
+	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/s3"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/admission/validator"
 	apisgdc "github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/errors"
@@ -61,6 +62,7 @@ func getGeneratedSecretName(bucketName string) string {
 // This allows for easy mocking in unit tests.
 type clientFactory interface {
 	GetOrgClient(gdchConfig *gdcclient.OrgClusterConfig, serviceAccount *auth.ServiceAccount, scheme *runtime.Scheme) (client.Client, error)
+	NewS3Client(config *s3.Config) (s3.Client, error)
 }
 
 // defaultClientFactory is the standard implementation of clientFactory for production code.
@@ -73,6 +75,11 @@ func (f *defaultClientFactory) GetOrgClient(gdchConfig *gdcclient.OrgClusterConf
 		return nil, fmt.Errorf("failed to create org client: %w", err)
 	}
 	return client, nil
+}
+
+// NewS3Client creates a client for the GDC object storage S3 endpoint.
+func (f *defaultClientFactory) NewS3Client(config *s3.Config) (s3.Client, error) {
+	return s3.NewGDCHS3Client(config)
 }
 
 type actuator struct {
@@ -183,10 +190,19 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 	bucketToDelete.SetName(backupBucket.Name)
 	bucketToDelete.SetNamespace(bucketClient.serviceAccount.Project)
 
+	if err := a.deleteBucketObjects(ctx, bucketToDelete, bucketClient); err != nil {
+		return errors.DetermineError(fmt.Errorf("failed to delete objects from backup bucket %q: %w", backupBucket.Name, err))
+	}
+
 	if err := bucketClient.orgClient.Delete(ctx, bucketToDelete); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete bucket %q: %w", backupBucket.Name, err)
 		}
+	}
+	if err := bucketClient.orgClient.Get(ctx, client.ObjectKeyFromObject(bucketToDelete), bucketToDelete); err == nil {
+		return errors.DetermineError(fmt.Errorf("RetryableError: bucket %q is still being deleted", backupBucket.Name))
+	} else if !apierrors.IsNotFound(err) {
+		return errors.DetermineError(fmt.Errorf("failed to verify deletion of bucket %q: %w", backupBucket.Name, err))
 	}
 
 	secretName := getGeneratedSecretName(backupBucket.Name)
@@ -200,6 +216,60 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete generated secret %q: %w", secretName, err)
 		}
+	}
+
+	return nil
+}
+
+// deleteBucketObjects removes all object versions and delete markers. S3 bucket
+// deletion fails for either of them when versioning is enabled.
+func (a *actuator) deleteBucketObjects(ctx context.Context, bucketObject client.Object, bucketClient *backupBucketClientConfig) error {
+	if err := bucketClient.orgClient.Get(ctx, client.ObjectKeyFromObject(bucketObject), bucketObject); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get bucket metadata: %w", err)
+	}
+
+	var endpoint, region, fullyQualifiedName string
+	switch bucket := bucketObject.(type) {
+	case *objectv1.Bucket:
+		endpoint = bucket.Status.Endpoint
+		region = bucket.Status.Region
+		fullyQualifiedName = bucket.Status.FullyQualifiedName
+	case *globalv1.Bucket:
+		endpoint = bucket.Status.GlobalEndpoint
+		region = bucket.Status.Region
+		fullyQualifiedName = bucket.Status.FullyQualifiedName
+	default:
+		return fmt.Errorf("unsupported bucket type %T", bucketObject)
+	}
+	if endpoint == "" || region == "" || fullyQualifiedName == "" {
+		klog.Infof("Bucket %s/%s status is missing endpoint, region, or fully qualified name; skipping S3 object deletion", bucketObject.GetNamespace(), bucketObject.GetName())
+		return nil
+	}
+
+	accessKeys, err := storage.GetAccessKeyAndKeyID(ctx, bucketClient.orgClient, bucketClient.serviceAccount, bucketClient.gdchConfig.OrgClusterURL)
+	if err != nil {
+		return fmt.Errorf("failed to get bucket access keys: %w", err)
+	}
+	caData, err := base64.StdEncoding.DecodeString(bucketClient.gdchConfig.CAData)
+	if err != nil {
+		return fmt.Errorf("failed to decode CA data: %w", err)
+	}
+	storageClient, err := a.clientFactory.NewS3Client(&s3.Config{
+		AccessKeyId:     string(accessKeys.AccessKeyID),
+		SecretAccessKey: string(accessKeys.AccessKey),
+		EndpointUrl:     endpoint,
+		Region:          region,
+		S3Certificate:   caData,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create S3 client: %w", err)
+	}
+
+	if err := storageClient.DeleteObjectVersionsWithPrefix(ctx, fullyQualifiedName, ""); err != nil {
+		return fmt.Errorf("failed to delete object versions: %w", err)
 	}
 
 	return nil
