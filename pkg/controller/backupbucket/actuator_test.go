@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1008,6 +1009,135 @@ func TestActuator_DualZoneBucket_Delete(t *testing.T) {
 	})
 }
 
+func TestCreateBucket_RetentionDays(t *testing.T) {
+	decoder := serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder()
+	sa := &auth.ServiceAccount{Name: serviceAccountName, Project: testProject}
+
+	testCases := []struct {
+		name               string
+		retentionDays      *int32
+		expectedPolicyDays *int32
+		expectNilPolicy    bool
+		expectErr          bool
+	}{
+		{
+			name:               "defaults to 1 day when unset",
+			retentionDays:      nil,
+			expectedPolicyDays: ptr.To(int32(1)),
+		},
+		{
+			name:               "uses configured positive value",
+			retentionDays:      ptr.To(int32(7)),
+			expectedPolicyDays: ptr.To(int32(7)),
+		},
+		{
+			name:            "omits locking policy when set to 0",
+			retentionDays:   ptr.To(int32(0)),
+			expectNilPolicy: true,
+		},
+		{
+			name:          "returns error when negative",
+			retentionDays: ptr.To(int32(-1)),
+			expectErr:     true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("zonal_"+tc.name, func(t *testing.T) {
+			orgClient := newTestClient()
+			var providerConfig *runtime.RawExtension
+			if tc.retentionDays != nil {
+				providerConfig = &runtime.RawExtension{
+					Raw: encode(&gdc.BackupBucketConfig{
+						TypeMeta: metav1.TypeMeta{
+							Kind:       "BackupBucketConfig",
+							APIVersion: gdc.SchemeGroupVersion.String(),
+						},
+						DefaultObjectRetentionDays: tc.retentionDays,
+					}),
+				}
+			}
+
+			err := createZonalBucketIfNotExists(context.Background(), decoder, backupBucketName, providerConfig, orgClient, sa)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got := &objectv1.Bucket{}
+			if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, got); err != nil {
+				t.Fatalf("failed to get created zonal bucket: %v", err)
+			}
+			if tc.expectNilPolicy {
+				if got.Spec.BucketPolicy != nil {
+					t.Errorf("expected nil BucketPolicy, got %+v", got.Spec.BucketPolicy)
+				}
+			} else {
+				if got.Spec.BucketPolicy == nil || got.Spec.BucketPolicy.LockingPolicy == nil {
+					t.Fatalf("expected non-nil BucketPolicy.LockingPolicy, got %+v", got.Spec.BucketPolicy)
+				}
+				if diff := cmp.Diff(tc.expectedPolicyDays, got.Spec.BucketPolicy.LockingPolicy.DefaultObjectRetentionDays); diff != "" {
+					t.Errorf("unexpected DefaultObjectRetentionDays (-want +got):\n%s", diff)
+				}
+			}
+		})
+
+		t.Run("dualzone_"+tc.name, func(t *testing.T) {
+			orgClient := newTestClient()
+			providerConfig := &runtime.RawExtension{
+				Raw: encode(&gdc.BackupBucketConfig{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "BackupBucketConfig",
+						APIVersion: gdc.SchemeGroupVersion.String(),
+					},
+					DualZoneBucketLocation:     "syncz1z2",
+					DefaultObjectRetentionDays: tc.retentionDays,
+				}),
+			}
+
+			err := createDualZoneBucketIfNotExists(context.Background(), decoder, backupBucketName, providerConfig, orgClient, sa)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			got := &globalv1.Bucket{}
+			if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, got); err != nil {
+				t.Fatalf("failed to get created dual-zone bucket: %v", err)
+			}
+			if tc.expectNilPolicy {
+				if got.Spec.BucketPolicy != nil {
+					t.Errorf("expected nil BucketPolicy, got %+v", got.Spec.BucketPolicy)
+				}
+			} else {
+				if got.Spec.BucketPolicy == nil || got.Spec.BucketPolicy.LockingPolicy == nil {
+					t.Fatalf("expected non-nil BucketPolicy.LockingPolicy, got %+v", got.Spec.BucketPolicy)
+				}
+				if diff := cmp.Diff(tc.expectedPolicyDays, got.Spec.BucketPolicy.LockingPolicy.DefaultObjectRetentionDays); diff != "" {
+					t.Errorf("unexpected DefaultObjectRetentionDays (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+
+	t.Run("dualzone_returns_error_when_providerConfig_is_nil", func(t *testing.T) {
+		orgClient := newTestClient()
+		if err := createDualZoneBucketIfNotExists(context.Background(), decoder, backupBucketName, nil, orgClient, sa); err == nil {
+			t.Fatal("expected error when providerConfig is nil for dual-zone bucket, got nil")
+		}
+	})
+}
+
 func mustMarshalJSON(t *testing.T, v interface{}) []byte {
 	t.Helper()
 	data, err := json.Marshal(v)
@@ -1137,4 +1267,71 @@ func getRuntimeScheme() *runtime.Scheme {
 func encode(obj runtime.Object) []byte {
 	data, _ := json.Marshal(obj)
 	return data
+}
+
+func TestGetLockingPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    *gdc.BackupBucketConfig
+		wantDays  *int32
+		wantNil   bool
+		wantError bool
+	}{
+		{
+			name:     "nil config defaults to 1 day",
+			config:   nil,
+			wantDays: ptr.To(int32(1)),
+		},
+		{
+			name:     "unset DefaultObjectRetentionDays defaults to 1 day",
+			config:   &gdc.BackupBucketConfig{},
+			wantDays: ptr.To(int32(1)),
+		},
+		{
+			name:    "DefaultObjectRetentionDays set to 0 disables locking policy",
+			config:  &gdc.BackupBucketConfig{DefaultObjectRetentionDays: ptr.To(int32(0))},
+			wantNil: true,
+		},
+		{
+			name:     "DefaultObjectRetentionDays set to 7",
+			config:   &gdc.BackupBucketConfig{DefaultObjectRetentionDays: ptr.To(int32(7))},
+			wantDays: ptr.To(int32(7)),
+		},
+		{
+			name:     "DefaultObjectRetentionDays set to maximum 36500",
+			config:   &gdc.BackupBucketConfig{DefaultObjectRetentionDays: ptr.To(int32(36500))},
+			wantDays: ptr.To(int32(36500)),
+		},
+		{
+			name:      "DefaultObjectRetentionDays negative returns error",
+			config:    &gdc.BackupBucketConfig{DefaultObjectRetentionDays: ptr.To(int32(-1))},
+			wantError: true,
+		},
+		{
+			name:      "DefaultObjectRetentionDays exceeding 36500 returns error",
+			config:    &gdc.BackupBucketConfig{DefaultObjectRetentionDays: ptr.To(int32(36501))},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := getLockingPolicy(tt.config)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("getLockingPolicy() error = %v, wantError %v", err, tt.wantError)
+			}
+			if tt.wantError {
+				return
+			}
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("getLockingPolicy() = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil || got.DefaultObjectRetentionDays == nil || *got.DefaultObjectRetentionDays != *tt.wantDays {
+				t.Fatalf("getLockingPolicy() = %+v, want DefaultObjectRetentionDays=%d", got, *tt.wantDays)
+			}
+		})
+	}
 }

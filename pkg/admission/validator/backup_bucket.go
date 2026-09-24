@@ -86,16 +86,27 @@ func (b *backupBucket) Validate(_ context.Context, newObj, oldObj client.Object)
 		return nil
 	}
 
+	var oldBackupBucketConfig *apisgdc.BackupBucketConfig
+	if oldProviderConfig != nil {
+		var err error
+		oldBackupBucketConfig, err = DecodeBackupBucketConfig(b.decoder, oldProviderConfig)
+		if err != nil {
+			return err
+		}
+	}
+
+	if getEffectiveRetentionDays(newBackupBucketConfig) != getEffectiveRetentionDays(oldBackupBucketConfig) {
+		if val, ok := newSeed.Annotations[overrideAnnotation]; ok && val == "true" {
+			return nil
+		}
+		return fmt.Errorf("defaultObjectRetentionDays is immutable and cannot be changed without '%s=true' annotation", overrideAnnotation)
+	}
+
 	if (newProviderConfig == nil && oldProviderConfig != nil) || (newProviderConfig != nil && oldProviderConfig == nil) {
 		if val, ok := newSeed.Annotations[overrideAnnotation]; ok && val == "true" {
 			return nil
 		}
 		return fmt.Errorf("cannot change backup bucket flow from dual-zone to zonal or vice-versa without '%s=true' annotation", overrideAnnotation)
-	}
-
-	oldBackupBucketConfig, err := DecodeBackupBucketConfig(b.decoder, oldProviderConfig)
-	if err != nil {
-		return err
 	}
 
 	if !reflect.DeepEqual(newBackupBucketConfig, oldBackupBucketConfig) {
@@ -108,6 +119,13 @@ func (b *backupBucket) Validate(_ context.Context, newObj, oldObj client.Object)
 	return nil
 }
 
+func getEffectiveRetentionDays(config *apisgdc.BackupBucketConfig) int32 {
+	if config == nil || config.DefaultObjectRetentionDays == nil {
+		return apisgdc.DefaultObjectRetentionDays
+	}
+	return *config.DefaultObjectRetentionDays
+}
+
 func validateChecksumSettings(config *apisgdc.BackupBucketConfig) error {
 	if config.RequestChecksumCalculation != "" {
 		if err := validateChecksumValue(config.RequestChecksumCalculation); err != nil {
@@ -118,6 +136,9 @@ func validateChecksumSettings(config *apisgdc.BackupBucketConfig) error {
 		if err := validateChecksumValue(config.ResponseChecksumValidation); err != nil {
 			return fmt.Errorf("invalid ResponseChecksumValidation: %w", err)
 		}
+	}
+	if config.DefaultObjectRetentionDays != nil && (*config.DefaultObjectRetentionDays < 0 || *config.DefaultObjectRetentionDays > apisgdc.MaxObjectRetentionDays) {
+		return fmt.Errorf("invalid DefaultObjectRetentionDays: value %d must be between 0 and %d", *config.DefaultObjectRetentionDays, apisgdc.MaxObjectRetentionDays)
 	}
 	return nil
 }

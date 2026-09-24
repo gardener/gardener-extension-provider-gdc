@@ -220,6 +220,7 @@ func autoConvert_v1alpha1_BackupBucketConfig_To_gdc_BackupBucketConfig(in *Backu
 	out.DualZoneBucketLocation = in.DualZoneBucketLocation
 	out.RequestChecksumCalculation = in.RequestChecksumCalculation
 	out.ResponseChecksumValidation = in.ResponseChecksumValidation
+	out.DefaultObjectRetentionDays = (*int32)(unsafe.Pointer(in.DefaultObjectRetentionDays))
 	return nil
 }
 
@@ -232,6 +233,7 @@ func autoConvert_gdc_BackupBucketConfig_To_v1alpha1_BackupBucketConfig(in *gdc.B
 	out.DualZoneBucketLocation = in.DualZoneBucketLocation
 	out.RequestChecksumCalculation = in.RequestChecksumCalculation
 	out.ResponseChecksumValidation = in.ResponseChecksumValidation
+	out.DefaultObjectRetentionDays = (*int32)(unsafe.Pointer(in.DefaultObjectRetentionDays))
 	return nil
 }
 
