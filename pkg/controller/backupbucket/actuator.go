@@ -51,6 +51,7 @@ import (
 const (
 	generatedSecretNamespace = "garden"
 	bucketDescription        = "storage for etcd backups"
+	backupLifecycleRuleID    = "expire-noncurrent-backup-versions"
 )
 
 func getGeneratedSecretName(bucketName string) string {
@@ -444,6 +445,27 @@ func getLockingPolicy(config *apisgdc.BackupBucketConfig) (*objectv1.LockingPoli
 	}, nil
 }
 
+// getLifecyclePolicy computes the LifecyclePolicy to pair with a LockingPolicy so that soft-deleted
+// noncurrent backup versions and expired delete markers are automatically purged after the retention period.
+func getLifecyclePolicy(lockingPolicy *objectv1.LockingPolicy) *objectv1.LifecyclePolicy {
+	if lockingPolicy == nil || lockingPolicy.DefaultObjectRetentionDays == nil || *lockingPolicy.DefaultObjectRetentionDays <= 0 {
+		return nil
+	}
+	return &objectv1.LifecyclePolicy{
+		Enable: true,
+		LifecycleRules: []*objectv1.LifecycleRule{
+			{
+				ID:     ptr.To(backupLifecycleRuleID),
+				Status: ptr.To(objectv1.Enabled),
+				NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{
+					NoncurrentDays: ptr.To(int64(*lockingPolicy.DefaultObjectRetentionDays)),
+				},
+				ExpiredObjectDeleteMarker: ptr.To(true),
+			},
+		},
+	}
+}
+
 // createZonalBucketIfNotExists ignore if bucket already exist otherwise create it.
 func createZonalBucketIfNotExists(ctx context.Context, decoder runtime.Decoder, bucketName string, providerConfig *runtime.RawExtension, orgClient client.Client, serviceAccount *auth.ServiceAccount) error {
 	bucket := &objectv1.Bucket{
@@ -489,12 +511,14 @@ func createBucketIfNotExists(ctx context.Context, decoder runtime.Decoder, provi
 	if err != nil {
 		return err
 	}
+	lifecyclePolicy := getLifecyclePolicy(lockingPolicy)
 
 	switch b := bucketObject.(type) {
 	case *objectv1.Bucket:
 		if lockingPolicy != nil {
 			b.Spec.BucketPolicy = &objectv1.BucketPolicy{
-				LockingPolicy: lockingPolicy,
+				LockingPolicy:   lockingPolicy,
+				LifecyclePolicy: lifecyclePolicy,
 			}
 		}
 	case *globalv1.Bucket:
@@ -504,7 +528,8 @@ func createBucketIfNotExists(ctx context.Context, decoder runtime.Decoder, provi
 		b.Spec.Location = backupBucketConfig.DualZoneBucketLocation
 		if lockingPolicy != nil {
 			b.Spec.BucketPolicy = &objectv1.GlobalBucketPolicy{
-				LockingPolicy: lockingPolicy,
+				LockingPolicy:   lockingPolicy,
+				LifecyclePolicy: lifecyclePolicy,
 			}
 		}
 	}
