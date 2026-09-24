@@ -62,42 +62,31 @@ func (m *mockClient) ListObjectsV2Pages(_ context.Context, bucketFQN string) ([]
 	return objects, nil
 }
 
-func (m *mockClient) ListObjectVersionsPages(_ context.Context, bucketFQN string) ([]ObjectVersion, error) {
-	bucket, ok := m.buckets[bucketFQN]
-	if !ok {
-		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
-	}
-
-	var objectVersions []ObjectVersion
-	for objectKey, object := range bucket.Objects {
-		for _, version := range object.Versions {
-			objectVersions = append(objectVersions, ObjectVersion{
-				ObjectKey: objectKey,
-				VersionID: version.VersionID,
-			})
-		}
-	}
-	return objectVersions, nil
-}
-
 func (m *mockClient) DeleteObjectVersionsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
 	if m.DeleteObjectVersionsWithPrefixFunc != nil {
 		return m.DeleteObjectVersionsWithPrefixFunc(ctx, bucketFQN, prefix)
 	}
 
-	versions, err := m.ListObjectVersionsPages(ctx, bucketFQN)
-	if err != nil {
-		return err
+	bucket, ok := m.buckets[bucketFQN]
+	if !ok {
+		return fmt.Errorf("no such bucket %q", bucketFQN)
 	}
-	for _, version := range versions {
-		if !strings.HasPrefix(version.ObjectKey, prefix) {
+
+	var objects []DeleteObjectInput
+	for objectKey, object := range bucket.Objects {
+		if !strings.HasPrefix(objectKey, prefix) {
 			continue
 		}
-		if _, err := m.DeleteObject(ctx, DeleteObjectInput{
-			BucketFqn: bucketFQN,
-			ObjectKey: version.ObjectKey,
-			VersionId: version.VersionID,
-		}); err != nil {
+		for _, version := range object.Versions {
+			objects = append(objects, DeleteObjectInput{
+				BucketFqn: bucketFQN,
+				ObjectKey: objectKey,
+				VersionId: version.VersionID,
+			})
+		}
+	}
+	for _, object := range objects {
+		if _, err := m.DeleteObject(ctx, object); err != nil {
 			return err
 		}
 	}

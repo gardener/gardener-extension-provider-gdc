@@ -245,7 +245,8 @@ func (a *actuator) deleteBucketObjects(ctx context.Context, bucketObject client.
 		return fmt.Errorf("unsupported bucket type %T", bucketObject)
 	}
 	if endpoint == "" || region == "" || fullyQualifiedName == "" {
-		return fmt.Errorf("bucket status is missing endpoint, region, or fully qualified name")
+		klog.Infof("Bucket %s/%s status is missing endpoint, region, or fully qualified name; skipping S3 object deletion", bucketObject.GetNamespace(), bucketObject.GetName())
+		return nil
 	}
 
 	accessKeys, err := storage.GetAccessKeyAndKeyID(ctx, bucketClient.orgClient, bucketClient.serviceAccount, bucketClient.gdchConfig.OrgClusterURL)

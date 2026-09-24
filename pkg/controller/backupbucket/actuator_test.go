@@ -703,14 +703,13 @@ func TestActuator_ZonalBucket_Delete(t *testing.T) {
 		}
 		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
 		orgClient := newTestClient(bucket, newAccessKeySecretForDelete())
-		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
-			Buckets: map[string]*s3.MockBucket{
-				fullyQualifiedBucketName: {
-					Objects: map[string]*s3.MockObject{
-						"backup/object": {Versions: []*s3.MockObjectVersion{{VersionID: testPtr("version-1")}, {VersionID: testPtr("delete-marker")}}},
-					},
-				},
+		mockBucket := &s3.MockBucket{
+			Objects: map[string]*s3.MockObject{
+				"backup/object": {Versions: []*s3.MockObjectVersion{{VersionID: testPtr("version-1")}, {VersionID: testPtr("delete-marker")}}},
 			},
+		}
+		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
+			Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: mockBucket},
 		})
 
 		// Create an instance of our mock factory
@@ -745,8 +744,40 @@ func TestActuator_ZonalBucket_Delete(t *testing.T) {
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("expected generated secret to be deleted from seed cluster, but it was not. err: %v", err)
 		}
-		if objects, err := s3Client.ListObjectVersionsPages(context.Background(), fullyQualifiedBucketName); err != nil || len(objects) != 0 {
-			t.Errorf("expected all object versions and delete markers to be removed, got %d objects and error %v", len(objects), err)
+		if len(mockBucket.Objects) != 0 {
+			t.Errorf("expected all object versions and delete markers to be removed, got %d objects", len(mockBucket.Objects))
+		}
+	})
+
+	t.Run("should succeed when bucket was never provisioned", func(t *testing.T) {
+		unprovisionedBucket := newBucket(backupBucketName, false)
+		unprovisionedBucket.Status = objectv1.BucketStatus{}
+		secretName := getGeneratedSecretName(backupBucketName)
+		generatedSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace}}
+		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
+		orgClient := newTestClient(unprovisionedBucket)
+		a := &actuator{
+			client: testClient,
+			clientFactory: &mockClientFactory{
+				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
+					return orgClient, nil
+				},
+				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
+					t.Fatal("S3 client must not be created for an unprovisioned bucket")
+					return nil, nil
+				},
+			},
+			decoder: serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
+		}
+
+		if err := a.Delete(context.Background(), logr.Logger{}, backupBucket); err != nil {
+			t.Fatalf("Delete() returned error: %v", err)
+		}
+		if err := orgClient.Get(context.Background(), client.ObjectKeyFromObject(unprovisionedBucket), &objectv1.Bucket{}); !apierrors.IsNotFound(err) {
+			t.Errorf("expected unprovisioned bucket to be deleted, got error %v", err)
+		}
+		if err := testClient.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+			t.Errorf("expected generated secret to be deleted, got error %v", err)
 		}
 	})
 
@@ -793,12 +824,12 @@ func TestActuator_ZonalBucket_Delete(t *testing.T) {
 		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
 		orgClient := newTestClient(bucket.DeepCopy(), newAccessKeySecretForDelete())
 		retained := true
-		contextKey := struct{}{}
-		ctx := context.WithValue(context.Background(), contextKey, "delete")
+		type contextKey struct{}
+		ctx := context.WithValue(context.Background(), contextKey{}, "delete")
 		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
 			Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: {Objects: map[string]*s3.MockObject{}}},
 			DeleteObjectVersionsWithPrefixFunc: func(callCtx context.Context, bucketFQN, prefix string) error {
-				if callCtx.Value(contextKey) != "delete" {
+				if callCtx.Value(contextKey{}) != "delete" {
 					t.Error("reconciliation context was not propagated to the S3 client")
 				}
 				if bucketFQN != fullyQualifiedBucketName || prefix != "" {

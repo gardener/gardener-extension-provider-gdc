@@ -85,6 +85,9 @@ func TestDeleteObjectVersionsWithPrefixStreamsPagesAndPropagatesContext(t *testi
 		if got := aws.StringValue(input.Prefix); got != "shoot/" {
 			t.Fatalf("got prefix %q, want %q", got, "shoot/")
 		}
+		if got := aws.Int64Value(input.MaxKeys); got != 1000 {
+			t.Fatalf("got max keys %d, want 1000", got)
+		}
 		if !callback(&awss3.ListObjectVersionsOutput{
 			Versions:      []*awss3.ObjectVersion{{Key: aws.String("shoot/full"), VersionId: aws.String("v1")}},
 			DeleteMarkers: []*awss3.DeleteMarkerEntry{{Key: aws.String("shoot/full"), VersionId: aws.String("m1")}},
