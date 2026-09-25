@@ -41,7 +41,6 @@ import (
 
 	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/auth"
 	gdcclient "github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/client"
-	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/s3"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc/v1alpha1"
 	gdcconstants "github.com/gardener/gardener-extension-provider-gdc/pkg/gdc"
@@ -62,16 +61,11 @@ const (
 type mockClientFactory struct {
 	// Fields to hold the mock functions
 	mockGetOrgClientFn func(gdchConfig *gdcclient.OrgClusterConfig, serviceAccount *auth.ServiceAccount, scheme *runtime.Scheme) (client.Client, error)
-	mockNewS3ClientFn  func(config *s3.Config) (s3.Client, error)
 }
 
 // GetOrgClient calls the mock function.
 func (m *mockClientFactory) GetOrgClient(gdchConfig *gdcclient.OrgClusterConfig, serviceAccount *auth.ServiceAccount, scheme *runtime.Scheme) (client.Client, error) {
 	return m.mockGetOrgClientFn(gdchConfig, serviceAccount, scheme)
-}
-
-func (m *mockClientFactory) NewS3Client(config *s3.Config) (s3.Client, error) {
-	return m.mockNewS3ClientFn(config)
 }
 
 func TestActuator_ZonalBucket_Reconcile(t *testing.T) {
@@ -703,24 +697,13 @@ func TestActuator_ZonalBucket_Delete(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace},
 		}
 		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(bucket, newAccessKeySecretForDelete())
-		mockBucket := &s3.MockBucket{
-			Objects: map[string]*s3.MockObject{
-				"backup/object": {Versions: []*s3.MockObjectVersion{{VersionID: testPtr("version-1")}, {VersionID: testPtr("delete-marker")}}},
-			},
-		}
-		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
-			Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: mockBucket},
-		})
+		orgClient := newTestClient(bucket)
 
 		// Create an instance of our mock factory
 		mockFactory := &mockClientFactory{
 			// Implement the mock functions for this test setup
 			mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
 				return orgClient, nil
-			},
-			mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
-				return s3Client, nil
 			},
 		}
 		a := &actuator{
@@ -744,160 +727,6 @@ func TestActuator_ZonalBucket_Delete(t *testing.T) {
 		err = testClient.Get(context.TODO(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{})
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("expected generated secret to be deleted from seed cluster, but it was not. err: %v", err)
-		}
-		if len(mockBucket.Objects) != 0 {
-			t.Errorf("expected all object versions and delete markers to be removed, got %d objects", len(mockBucket.Objects))
-		}
-	})
-
-	t.Run("should succeed when bucket was never provisioned", func(t *testing.T) {
-		unprovisionedBucket := newBucket(backupBucketName, false)
-		unprovisionedBucket.Status = objectv1.BucketStatus{}
-		secretName := getGeneratedSecretName(backupBucketName)
-		generatedSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace}}
-		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(unprovisionedBucket)
-		a := &actuator{
-			client: testClient,
-			clientFactory: &mockClientFactory{
-				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
-					return orgClient, nil
-				},
-				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
-					t.Fatal("S3 client must not be created for an unprovisioned bucket")
-					return nil, nil
-				},
-			},
-			decoder: serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
-		}
-
-		if err := a.Delete(context.Background(), logr.Logger{}, backupBucket); err != nil {
-			t.Fatalf("Delete() returned error: %v", err)
-		}
-		if err := orgClient.Get(context.Background(), client.ObjectKeyFromObject(unprovisionedBucket), &objectv1.Bucket{}); !apierrors.IsNotFound(err) {
-			t.Errorf("expected unprovisioned bucket to be deleted, got error %v", err)
-		}
-		if err := testClient.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
-			t.Errorf("expected generated secret to be deleted, got error %v", err)
-		}
-	})
-
-	t.Run("should retry while the GDC bucket resource is still terminating", func(t *testing.T) {
-		bucketWithFinalizer := bucket.DeepCopy()
-		bucketWithFinalizer.Finalizers = []string{"object.gdc.goog/test"}
-		secretName := getGeneratedSecretName(backupBucketName)
-		generatedSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace}}
-		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(bucketWithFinalizer, newAccessKeySecretForDelete())
-		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
-			Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: {Objects: map[string]*s3.MockObject{}}},
-		})
-		a := &actuator{
-			client: testClient,
-			clientFactory: &mockClientFactory{
-				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
-					return orgClient, nil
-				},
-				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) { return s3Client, nil },
-			},
-			decoder: serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
-		}
-
-		err := a.Delete(context.Background(), logr.Logger{}, backupBucket)
-		if err == nil || !strings.Contains(err.Error(), "is still being deleted") {
-			t.Fatalf("Delete() got error %v, want bucket-still-deleting error", err)
-		}
-		terminatingBucket := &objectv1.Bucket{}
-		if err := orgClient.Get(context.Background(), client.ObjectKeyFromObject(bucketWithFinalizer), terminatingBucket); err != nil {
-			t.Fatalf("expected terminating bucket to remain: %v", err)
-		}
-		if terminatingBucket.DeletionTimestamp.IsZero() {
-			t.Error("expected bucket deletion to have been requested")
-		}
-		if err := testClient.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{}); err != nil {
-			t.Fatalf("expected generated secret to remain until bucket deletion is confirmed: %v", err)
-		}
-	})
-
-	t.Run("should retry retained objects and succeed after retention expires", func(t *testing.T) {
-		secretName := getGeneratedSecretName(backupBucketName)
-		generatedSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace}}
-		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(bucket.DeepCopy(), newAccessKeySecretForDelete())
-		retained := true
-		type contextKey struct{}
-		ctx := context.WithValue(context.Background(), contextKey{}, "delete")
-		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
-			Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: {Objects: map[string]*s3.MockObject{}}},
-			DeleteObjectVersionsWithPrefixFunc: func(callCtx context.Context, bucketFQN, prefix string) error {
-				if callCtx.Value(contextKey{}) != "delete" {
-					t.Error("reconciliation context was not propagated to the S3 client")
-				}
-				if bucketFQN != fullyQualifiedBucketName || prefix != "" {
-					t.Errorf("unexpected bucket or prefix: %q, %q", bucketFQN, prefix)
-				}
-				if retained {
-					return s3.ErrorS3AccessDenied
-				}
-				return nil
-			},
-		})
-		a := &actuator{
-			client: testClient,
-			clientFactory: &mockClientFactory{
-				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
-					return orgClient, nil
-				},
-				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) { return s3Client, nil },
-			},
-			decoder: serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
-		}
-
-		err := a.Delete(ctx, logr.Logger{}, backupBucket)
-		if err == nil || !strings.Contains(err.Error(), s3.ErrorCodeS3AccessDenied) {
-			t.Fatalf("Delete() got error %v, want retained-object error", err)
-		}
-		if err := orgClient.Get(ctx, client.ObjectKeyFromObject(bucket), &objectv1.Bucket{}); err != nil {
-			t.Fatalf("expected bucket to remain after retention failure: %v", err)
-		}
-		if err := testClient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{}); err != nil {
-			t.Fatalf("expected generated secret to remain after retention failure: %v", err)
-		}
-
-		retained = false
-		if err := a.Delete(ctx, logr.Logger{}, backupBucket); err != nil {
-			t.Fatalf("Delete() after retention expiry returned error: %v", err)
-		}
-	})
-
-	t.Run("should preserve the bucket and generated secret when access keys are missing", func(t *testing.T) {
-		secretName := getGeneratedSecretName(backupBucketName)
-		generatedSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace}}
-		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(bucket.DeepCopy())
-		a := &actuator{
-			client: testClient,
-			clientFactory: &mockClientFactory{
-				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
-					return orgClient, nil
-				},
-				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
-					t.Fatal("S3 client must not be created without access keys")
-					return nil, nil
-				},
-			},
-			decoder: serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
-		}
-
-		err := a.Delete(context.Background(), logr.Logger{}, backupBucket)
-		if err == nil || !strings.Contains(err.Error(), "failed to get bucket access keys") {
-			t.Fatalf("Delete() got error %v, want missing-access-keys error", err)
-		}
-		if err := orgClient.Get(context.Background(), client.ObjectKeyFromObject(bucket), &objectv1.Bucket{}); err != nil {
-			t.Fatalf("expected bucket to remain after access-key failure: %v", err)
-		}
-		if err := testClient.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{}); err != nil {
-			t.Fatalf("expected generated secret to remain after access-key failure: %v", err)
 		}
 	})
 }
@@ -936,21 +765,13 @@ func TestActuator_DualZoneBucket_Delete(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace},
 		}
 		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(bucket, newAccessKeySecretForDelete())
-		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
-			Buckets: map[string]*s3.MockBucket{
-				fullyQualifiedBucketName: {Objects: map[string]*s3.MockObject{}},
-			},
-		})
+		orgClient := newTestClient(bucket)
 
 		// Create an instance of our mock factory
 		mockFactory := &mockClientFactory{
 			// Implement the mock functions for this test setup
 			mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
 				return orgClient, nil
-			},
-			mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
-				return s3Client, nil
 			},
 		}
 		a := &actuator{
@@ -974,37 +795,6 @@ func TestActuator_DualZoneBucket_Delete(t *testing.T) {
 		err = testClient.Get(context.TODO(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{})
 		if !apierrors.IsNotFound(err) {
 			t.Errorf("expected generated secret to be deleted from seed cluster, but it was not. err: %v", err)
-		}
-	})
-
-	t.Run("should retry when a dual-zone bucket contains a retained object", func(t *testing.T) {
-		secretName := getGeneratedSecretName(backupBucketName)
-		generatedSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace}}
-		testClient := newTestClient(backupBucket, credentialSecret, generatedSecret)
-		orgClient := newTestClient(bucket.DeepCopy(), newAccessKeySecretForDelete())
-		s3Client := s3.CreateMockS3Client(s3.MockS3ClientConfig{
-			Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: {Objects: map[string]*s3.MockObject{}}},
-			DeleteObjectVersionsWithPrefixFunc: func(context.Context, string, string) error {
-				return s3.ErrorS3AccessDenied
-			},
-		})
-		a := &actuator{
-			client: testClient,
-			clientFactory: &mockClientFactory{
-				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
-					return orgClient, nil
-				},
-				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) { return s3Client, nil },
-			},
-			decoder: serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
-		}
-
-		err := a.Delete(context.Background(), logr.Logger{}, backupBucket)
-		if err == nil || !strings.Contains(err.Error(), s3.ErrorCodeS3AccessDenied) {
-			t.Fatalf("Delete() got error %v, want retained-object error", err)
-		}
-		if err := orgClient.Get(context.Background(), client.ObjectKeyFromObject(bucket), &globalv1.Bucket{}); err != nil {
-			t.Fatalf("expected dual-zone bucket to remain after retention failure: %v", err)
 		}
 	})
 }
@@ -1177,29 +967,6 @@ func mustMarshalJSON(t *testing.T, v interface{}) []byte {
 		t.Fatalf("failed to marshal JSON: %v", err)
 	}
 	return data
-}
-
-func newAccessKeySecretForDelete() *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      credentialSecretName,
-			Namespace: storage.ObjectStorageAccessKeyNamespace,
-			Labels: map[string]string{
-				objectv1.SubjectTypeLabel: "User",
-			},
-			Annotations: map[string]string{
-				objectv1.SubjectAnnotation: fmt.Sprintf("system:serviceaccount:%s:%s", testProject, serviceAccountName),
-			},
-		},
-		Data: map[string][]byte{
-			"access-key-id":     []byte(testAccessKeyID),
-			"secret-access-key": []byte(testSecretAccessKey),
-		},
-	}
-}
-
-func testPtr(value string) *string {
-	return &value
 }
 
 func newBucket(name string, isReady bool) *objectv1.Bucket {

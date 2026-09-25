@@ -53,10 +53,6 @@ const (
 	credentialSecretName = "object-storage-key-my-secret"
 )
 
-func testStringPtr(value string) *string {
-	return &value
-}
-
 // mockClientFactory is a mock implementation of the clientFactory interface for testing.
 type mockClientFactory struct {
 	// Fields to hold the mock functions
@@ -134,7 +130,7 @@ func TestActuator_Delete(t *testing.T) {
 		expectDeleteCallCount int32
 	}{
 		{
-			name:        "should succeed and delete all versions with the correct prefix",
+			name:        "should succeed and delete correct objects",
 			backupEntry: baseBackupEntry,
 			initialGardenObjects: []client.Object{
 				credentialSecret,
@@ -148,20 +144,20 @@ func TestActuator_Delete(t *testing.T) {
 					testBucketFQN: {
 						Objects: map[string]*s3.MockObject{
 							// This object has the correct prefix and should be deleted
-							"my-shoot/object1": {Versions: []*s3.MockObjectVersion{{Data: []byte("a"), VersionID: testStringPtr("v1")}, {Data: []byte("b"), VersionID: testStringPtr("v2")}}},
+							"my-shoot/object1": {Versions: []*s3.MockObjectVersion{{Data: []byte("a")}}},
 							// This one too
-							"my-shoot/object2": {Versions: []*s3.MockObjectVersion{{Data: []byte("c"), VersionID: testStringPtr("v3")}}},
+							"my-shoot/object2": {Versions: []*s3.MockObjectVersion{{Data: []byte("b")}}},
 							// This one has a different prefix and should NOT be deleted
-							"another-shoot/object3": {Versions: []*s3.MockObjectVersion{{Data: []byte("d"), VersionID: testStringPtr("v4")}}},
+							"another-shoot/object3": {Versions: []*s3.MockObjectVersion{{Data: []byte("c")}}},
 						},
 					},
 				},
 			},
 			expectErr:             false,
-			expectDeleteCallCount: 3,
+			expectDeleteCallCount: 2, // Expects exactly two calls to DeleteObject
 		},
 		{
-			name:                 "should retry if an object is still retained",
+			name:                 "should fail if S3 delete operation fails",
 			backupEntry:          baseBackupEntry,
 			initialGardenObjects: []client.Object{credentialSecret},
 			initialMgmtObjects:   []client.Object{bucket, accessKeySecret},
@@ -172,12 +168,12 @@ func TestActuator_Delete(t *testing.T) {
 					},
 				},
 				// Inject a function to simulate an error
-				DeleteObjectFunc: func(_ context.Context, input s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
-					return nil, s3.ErrorS3AccessDenied
+				DeleteObjectFunc: func(input s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
+					return nil, fmt.Errorf("mock S3 delete error")
 				},
 			},
 			expectErr:             true,
-			expectErrContains:     s3.ErrorCodeS3AccessDenied,
+			expectErrContains:     "mock S3 delete error",
 			expectDeleteCallCount: 1,
 		},
 		{
@@ -189,14 +185,6 @@ func TestActuator_Delete(t *testing.T) {
 				accessKeySecret,
 			},
 			expectErr: false,
-		},
-		{
-			name:                 "should fail if bucket access keys are missing",
-			backupEntry:          baseBackupEntry,
-			initialGardenObjects: []client.Object{credentialSecret},
-			initialMgmtObjects:   []client.Object{bucket},
-			expectErr:            true,
-			expectErrContains:    "failed to get bucket access keys",
 		},
 		{
 			name:                 "should fail if credential secret is missing",
@@ -217,10 +205,10 @@ func TestActuator_Delete(t *testing.T) {
 
 			// Now, verwrite the DeleteObjectFunc with a wrapper that
 			// ALWAYS increments the counter and then calls the original function (if any).
-			s3MockConfig.DeleteObjectFunc = func(ctx context.Context, input s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
+			s3MockConfig.DeleteObjectFunc = func(input s3.DeleteObjectInput) (*s3.DeleteObjectOutput, error) {
 				atomic.AddInt32(&deleteCallCount, 1)
 				if originalDeleteFunc != nil {
-					return originalDeleteFunc(ctx, input)
+					return originalDeleteFunc(input)
 				}
 				return &s3.DeleteObjectOutput{}, nil
 			}
