@@ -1084,6 +1084,22 @@ func TestCreateBucket_RetentionDays(t *testing.T) {
 				if diff := cmp.Diff(tc.expectedPolicyDays, got.Spec.BucketPolicy.LockingPolicy.DefaultObjectRetentionDays); diff != "" {
 					t.Errorf("unexpected DefaultObjectRetentionDays (-want +got):\n%s", diff)
 				}
+				expectedLifecycle := &objectv1.LifecyclePolicy{
+					Enable: true,
+					LifecycleRules: []*objectv1.LifecycleRule{
+						{
+							ID:     ptr.To(backupLifecycleRuleID),
+							Status: ptr.To(objectv1.Enabled),
+							NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{
+								NoncurrentDays: ptr.To(int64(*tc.expectedPolicyDays)),
+							},
+							ExpiredObjectDeleteMarker: ptr.To(true),
+						},
+					},
+				}
+				if diff := cmp.Diff(expectedLifecycle, got.Spec.BucketPolicy.LifecyclePolicy); diff != "" {
+					t.Errorf("unexpected LifecyclePolicy (-want +got):\n%s", diff)
+				}
 			}
 		})
 
@@ -1125,6 +1141,22 @@ func TestCreateBucket_RetentionDays(t *testing.T) {
 				}
 				if diff := cmp.Diff(tc.expectedPolicyDays, got.Spec.BucketPolicy.LockingPolicy.DefaultObjectRetentionDays); diff != "" {
 					t.Errorf("unexpected DefaultObjectRetentionDays (-want +got):\n%s", diff)
+				}
+				expectedLifecycle := &objectv1.LifecyclePolicy{
+					Enable: true,
+					LifecycleRules: []*objectv1.LifecycleRule{
+						{
+							ID:     ptr.To(backupLifecycleRuleID),
+							Status: ptr.To(objectv1.Enabled),
+							NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{
+								NoncurrentDays: ptr.To(int64(*tc.expectedPolicyDays)),
+							},
+							ExpiredObjectDeleteMarker: ptr.To(true),
+						},
+					},
+				}
+				if diff := cmp.Diff(expectedLifecycle, got.Spec.BucketPolicy.LifecyclePolicy); diff != "" {
+					t.Errorf("unexpected LifecyclePolicy (-want +got):\n%s", diff)
 				}
 			}
 		})
@@ -1331,6 +1363,56 @@ func TestGetLockingPolicy(t *testing.T) {
 			}
 			if got == nil || got.DefaultObjectRetentionDays == nil || *got.DefaultObjectRetentionDays != *tt.wantDays {
 				t.Fatalf("getLockingPolicy() = %+v, want DefaultObjectRetentionDays=%d", got, *tt.wantDays)
+			}
+		})
+	}
+}
+
+func TestGetLifecyclePolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		lockingPolicy *objectv1.LockingPolicy
+		want          *objectv1.LifecyclePolicy
+	}{
+		{
+			name:          "nil locking policy returns nil",
+			lockingPolicy: nil,
+			want:          nil,
+		},
+		{
+			name:          "nil DefaultObjectRetentionDays returns nil",
+			lockingPolicy: &objectv1.LockingPolicy{},
+			want:          nil,
+		},
+		{
+			name:          "zero DefaultObjectRetentionDays returns nil",
+			lockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(0))},
+			want:          nil,
+		},
+		{
+			name:          "positive DefaultObjectRetentionDays configures noncurrent expiration and delete marker cleanup",
+			lockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(7))},
+			want: &objectv1.LifecyclePolicy{
+				Enable: true,
+				LifecycleRules: []*objectv1.LifecycleRule{
+					{
+						ID:     ptr.To(backupLifecycleRuleID),
+						Status: ptr.To(objectv1.Enabled),
+						NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{
+							NoncurrentDays: ptr.To(int64(7)),
+						},
+						ExpiredObjectDeleteMarker: ptr.To(true),
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getLifecyclePolicy(tt.lockingPolicy)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("getLifecyclePolicy() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
