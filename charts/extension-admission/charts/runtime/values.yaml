@@ -23,6 +23,7 @@ image:
   pullPolicy: IfNotPresent
 replicaCount: 1
 resources: {}
+env: []
 metricsPort: 8080
 healthPort: 8081
 vpa:

@@ -21,6 +21,7 @@ replicaCount: 1
 maxUnavailable: 1
 maxSurge: 50%
 resources: {}
+env: []
 metricsPort: 8080
 healthPort: 8081
 

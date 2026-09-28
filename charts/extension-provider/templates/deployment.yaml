@@ -99,6 +99,9 @@ spec:
         - name: IMAGEVECTOR_OVERWRITE
           value: /charts_overwrite/images_overwrite.yaml
         {{- end }}
+        {{- if .Values.env }}
+        {{- toYaml .Values.env | nindent 8 }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /healthz
