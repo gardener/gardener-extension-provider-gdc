@@ -94,6 +94,9 @@ spec:
         - name: SOURCE_CLUSTER
           value: enabled
         {{- end }}
+        {{- if .Values.env }}
+        {{- toYaml .Values.env | nindent 8 }}
+        {{- end }}
         ports:
         - name: webhook-server
           containerPort: {{ .Values.webhookConfig.serverPort }}
