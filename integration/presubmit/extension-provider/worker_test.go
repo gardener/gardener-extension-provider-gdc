@@ -62,6 +62,9 @@ type workerControllerFixture struct {
 func (w *workerControllerFixture) test(t *testing.T) {
 	ctx := context.Background()
 
+	// Create a dedicated, isolated vcluster client for this subtest
+	w.vucClient = w.NewVClusterClient(t)
+
 	if w.workerNamespace == "" {
 		t.Fatalf("Worker namespace not specified")
 	}

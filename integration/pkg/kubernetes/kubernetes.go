@@ -138,19 +138,38 @@ func WaitForCondition[T runtime.Object](
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	watcher, err := startWatch()
-	if err != nil {
-		return fmt.Errorf("failed to start watch: %w", err)
-	}
-	defer watcher.Stop()
+	var watcher watch.Interface
+	defer func() {
+		if watcher != nil {
+			watcher.Stop()
+		}
+	}()
 
 	for {
+		if watcher == nil {
+			var err error
+			watcher, err = startWatch()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("failed to start watch: %w", err)
+				case <-time.After(2 * time.Second):
+					continue
+				}
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("timeout waiting for condition")
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return fmt.Errorf("watch channel closed")
+				watcher.Stop()
+				watcher = nil
+				if ctx.Err() != nil {
+					return fmt.Errorf("timeout waiting for condition")
+				}
+				continue
 			}
 			obj, ok := event.Object.(T)
 			if !ok {
