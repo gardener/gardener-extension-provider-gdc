@@ -67,24 +67,22 @@ import (
 )
 
 var (
-	commitHash          = flag.String("commit_hash", "", "the short commit hash for git repo")
-	vclusterChart       = flag.String("vcluster_chart", "", "Path to vcluster helm chart")
-	privateRegistry     = flag.String("private_registry", "", "Private cache registry to mirror vcluster images")
-	zone                = flag.String("zone", "", "the zone where vuc is deployed to")
-	region              = flag.String("region", "", "the region where vuc is deployed to")
-	availableZones      = flag.String("available_zones", "", "the available zones for Multi-zone setup provided as comma-separated value")
-	project             = flag.String("project", "", "the project where the vuc is created")
-	vuc                 = flag.String("vuc", "", "the vuc name")
-	org                 = flag.String("org", "", "the org name for gdc-ag lab")
-	labURL              = flag.String("lab_url", "", "the lab url for gdc-ag lab, e.g. staging.gpcdemolabs.com")
-	cafile              = flag.String("cafile", "", "the ca file to use for authentication")
-	safile              = flag.String("service_account", "", "the service account to use for authentication")
-	imagePullCredential = flag.String("image_pull_credential", "", "the config.json to use for image pull and push")
-	imageTag            = flag.String("image_tag", "", "the image tag for extension-provider. In the format image:tag")
-	chartPackage        = flag.String("chart_package", "", "the helm chart extension-provider to deploy")
-	managedDNSZone      = flag.String("managed_dns_zone", "", "the existing managed dns zone in staging lab")
-	vclusterK8sTag      = flag.String("vcluster_k8s_tag", "v1.35.0", "the kubernetes version tag for vcluster")
-	controllers         = flag.String("controllers", "", "comma-separated list of controllers/webhooks to run. If empty, all are run.")
+	commitHash     = flag.String("commit_hash", "", "the short commit hash for git repo")
+	vclusterChart  = flag.String("vcluster_chart", "", "Path to vcluster helm chart")
+	zone           = flag.String("zone", "", "the zone where vuc is deployed to")
+	region         = flag.String("region", "", "the region where vuc is deployed to")
+	availableZones = flag.String("available_zones", "", "the available zones for Multi-zone setup provided as comma-separated value")
+	project        = flag.String("project", "", "the project where the vuc is created")
+	vuc            = flag.String("vuc", "", "the vuc name")
+	org            = flag.String("org", "", "the org name for gdc-ag lab")
+	labURL         = flag.String("lab_url", "", "the lab url for gdc-ag lab, e.g. staging.gpcdemolabs.com")
+	cafile         = flag.String("cafile", "", "the ca file to use for authentication")
+	safile         = flag.String("service_account", "", "the service account to use for authentication")
+	imageTag       = flag.String("image_tag", "", "the image tag for extension-provider. In the format image:tag")
+	chartPackage   = flag.String("chart_package", "", "the helm chart extension-provider to deploy")
+	managedDNSZone = flag.String("managed_dns_zone", "", "the existing managed dns zone in staging lab")
+	vclusterK8sTag = flag.String("vcluster_k8s_tag", "v1.35.0", "the kubernetes version tag for vcluster")
+	controllers    = flag.String("controllers", "", "comma-separated list of controllers/webhooks to run. If empty, all are run.")
 )
 
 // k8sVersion returns the normalized semantic version without the leading 'v' (e.g. "1.35.0")
@@ -138,18 +136,22 @@ func TestExtensionProvider(t *testing.T) {
 	t.Logf("Running extension-provider presubmit test for commit %q", *commitHash)
 
 	common := setup(t, context.Background())
+	cloneCommon := func() *commonTestFixture {
+		c := *common
+		return &c
+	}
 
 	// setup test fixure for each controller
 	workerControllerTestFixture := workerControllerFixture{
-		commonTestFixture: common,
+		commonTestFixture: cloneCommon(),
 		workerNamespace:   common.namespace + "-worker",
 	}
 	infraFixture := infraTestFixture{
-		commonTestFixture: common,
+		commonTestFixture: cloneCommon(),
 		availableZones:    strings.Split(*availableZones, ","),
 	}
 	backupFixture := backupTestFixture{
-		commonTestFixture: common,
+		commonTestFixture: cloneCommon(),
 	}
 	runAll := len(*controllers) == 0
 	selected := make(map[string]bool)
@@ -169,16 +171,16 @@ func TestExtensionProvider(t *testing.T) {
 	}
 
 	bastionFixture := &bastionTestFixture{
-		commonTestFixture: common,
+		commonTestFixture: cloneCommon(),
 		bastionNamespace:  common.namespace + "-bastion",
 	}
 	controlPlaneFixture := controlPlaneTestFixture{
-		commonTestFixture:     common,
+		commonTestFixture:     cloneCommon(),
 		controlPlaneNamespace: common.namespace + "-controlplane",
 		availableZones:        strings.Split(*availableZones, ","),
 	}
 	extensionProviderWebhookTestFixture := extensionProviderWebhookTestFixture{
-		commonTestFixture: common,
+		commonTestFixture: cloneCommon(),
 	}
 
 	controllersList := []struct {
@@ -209,7 +211,7 @@ func TestExtensionProvider(t *testing.T) {
 			name: "DNSRecordController",
 			run: func(t *testing.T) {
 				t.Log("Initializing DNSRecord fixture...")
-				dnsrecordFixture := setupDNSRecordFixture(t, common)
+				dnsrecordFixture := setupDNSRecordFixture(t, cloneCommon())
 				dnsrecordFixture.test(t)
 			},
 		},
@@ -270,10 +272,6 @@ func setup(t *testing.T, ctx context.Context) *commonTestFixture {
 	// Create Test Fixture
 	fixture := createTestFixture(t, ctx, gdcClient)
 
-	// Inject image pull credential into the host namespace so the vcluster pod
-	// can pull its images (e.g., loft-sh/kubernetes) from the private registry.
-	setupImagePullSecret(t, ctx, fixture.vucClient, fixture.namespace)
-
 	vclusterName := "vcluster-" + ptr.Deref(commitHash, "")
 	vclusterClient, vcKubeconfigPath := setupVCluster(t, ctx, fixture.vucClient, fixture.namespace, vclusterName, fixture.scheme, hostKubeconfig)
 
@@ -300,7 +298,6 @@ func setup(t *testing.T, ctx context.Context) *commonTestFixture {
 	})
 
 	installCRDs(t, ctx, vclusterClient, k8sSemVer())
-	setupImagePullSecret(t, ctx, vclusterClient, fixture.namespace)
 	releaseName := setupHelmChart(t, vcKubeconfigPath, fixture.namespace)
 
 	// Register automatic log dumper on failure. Since this is registered after vcluster setup,
@@ -330,16 +327,6 @@ func setupVCluster(t *testing.T, ctx context.Context, hostClient client.WithWatc
 				"k8s": map[string]interface{}{
 					"image": map[string]interface{}{
 						"tag": *vclusterK8sTag,
-					},
-				},
-			},
-			"advanced": map[string]interface{}{
-				"defaultImageRegistry": *privateRegistry,
-				"serviceAccount": map[string]interface{}{
-					"imagePullSecrets": []interface{}{
-						map[string]interface{}{
-							"name": "harbor-registry-" + ptr.Deref(commitHash, ""),
-						},
 					},
 				},
 			},
@@ -641,35 +628,6 @@ func setupNamespace(t *testing.T, ctx context.Context, c client.WithWatch) strin
 	return namespace
 }
 
-// Create Secret for ImagePullSecret and register clean up
-// setupImagePullSecret creates a secret for pulling images from the registry.
-func setupImagePullSecret(t *testing.T, ctx context.Context, c client.Client, namespace string) {
-	cred, err := os.ReadFile(*imagePullCredential)
-	if err != nil {
-		t.Fatalf("cannot read imagePullCredential file %v", err)
-	}
-	imagePullSecretName := "harbor-registry-" + ptr.Deref(commitHash, "")
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      imagePullSecretName,
-			Namespace: namespace,
-		},
-		Data: map[string][]byte{
-			".dockerconfigjson": cred,
-		},
-		Type: "kubernetes.io/dockerconfigjson",
-	}
-	if err := c.Create(ctx, secret); err != nil {
-		t.Fatalf("cannot create Secret for imagePullCredential %v", err)
-	}
-	t.Cleanup(func() {
-		t.Logf("Cleaning up secret %q in namespace %q", secret.Name, secret.Namespace)
-		if err := c.Delete(ctx, secret); err != nil {
-			t.Logf("unable to clean up Secret for imagePullCredential, %v", err)
-		}
-	})
-}
-
 // setupHelmChart installs the extension provider helm chart.
 func setupHelmChart(t *testing.T, kubeconfig, namespace string) string {
 	releaseName := "extension-provider-chart-" + ptr.Deref(commitHash, "")
@@ -677,7 +635,6 @@ func setupHelmChart(t *testing.T, kubeconfig, namespace string) string {
 	if err != nil {
 		t.Fatalf("cannot parse image tag %v", err)
 	}
-	imagePullSecretName := "harbor-registry-" + ptr.Deref(commitHash, "")
 	imageVectorOverwrite := `images:
 - name: csi-provisioner
   repository: quay.io/openshift/origin-csi-external-provisioner
@@ -706,11 +663,6 @@ func setupHelmChart(t *testing.T, kubeconfig, namespace string) string {
 			"repository": imageURL,
 			"tag":        imageVer,
 			"pullPolicy": "Always",
-		},
-		"imagePullSecrets": []map[string]interface{}{
-			{
-				"name": imagePullSecretName,
-			},
 		},
 		"skipPriorityClassName": true,
 		"imageVectorOverwrite":  imageVectorOverwrite,

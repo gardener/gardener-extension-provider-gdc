@@ -125,27 +125,44 @@ func (ts *stsTokenSource) Token() (*oauth2.Token, error) {
 		return nil, fmt.Errorf("marshal request body: %v", err)
 	}
 
-	body := bytes.NewReader(jsonData)
-	req, err := http.NewRequest("POST", ts.tokenURI, body)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
 	client := ts.httpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch token: %w", err)
-	}
-	defer resp.Body.Close()
+	var resp *http.Response
+	var respBody []byte
+	var doErr, readErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		req, reqErr := http.NewRequest("POST", ts.tokenURI, bytes.NewReader(jsonData))
+		if reqErr != nil {
+			return nil, fmt.Errorf("create request: %v", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read fetched token: %w", err)
+		readErr = nil
+		resp, doErr = client.Do(req)
+		if doErr != nil {
+			continue
+		}
+		respBody, readErr = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			continue
+		}
+		if resp.StatusCode >= http.StatusInternalServerError {
+			continue
+		}
+		break
+	}
+	if doErr != nil {
+		return nil, fmt.Errorf("fetch token: %w", doErr)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("read fetched token: %w", readErr)
 	}
 
 	if resp.StatusCode != http.StatusOK {

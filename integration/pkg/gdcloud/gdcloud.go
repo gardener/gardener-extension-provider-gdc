@@ -18,10 +18,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 var gdcloudLocation = func() string {
 	if loc := os.Getenv("GDCLOUD_PATH"); loc != "" {
+		if info, err := os.Stat(loc); err == nil && info.IsDir() {
+			return filepath.Join(loc, "bin", "gdcloud")
+		}
 		return loc
 	}
 	return "gdcloud"
