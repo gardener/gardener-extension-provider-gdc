@@ -15,7 +15,6 @@
 package taskrunner
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
@@ -85,21 +84,43 @@ func (r *Runner) Run() (map[string]any, error) {
 	wg.Wait()
 	close(resultsCh)
 
-	var allErrors []string
+	var allErrors []error
 	successResults := make(map[string]any)
 
 	for res := range resultsCh {
 		if res.Err != nil {
-			allErrors = append(allErrors, res.Err.Error())
+			allErrors = append(allErrors, res.Err)
 			continue
 		}
 		successResults[res.TaskName] = res.Value
 	}
 
 	if len(allErrors) > 0 {
-		err := fmt.Errorf("%s", strings.Join(allErrors, ", "))
-		return successResults, errors.DetermineError(err)
+		return successResults, errors.DetermineError(joinErrors(allErrors))
 	}
 
 	return successResults, nil
+}
+
+type joinedError struct {
+	errs []error
+}
+
+func (e *joinedError) Error() string {
+	msgs := make([]string, len(e.errs))
+	for i, err := range e.errs {
+		msgs[i] = err.Error()
+	}
+	return strings.Join(msgs, ", ")
+}
+
+func (e *joinedError) Unwrap() []error {
+	return e.errs
+}
+
+func joinErrors(errs []error) error {
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return &joinedError{errs: errs}
 }

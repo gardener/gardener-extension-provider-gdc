@@ -41,6 +41,7 @@ import (
 	gdcclient "github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/client"
 	apisgdc "github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/cloudprofile"
+	"github.com/gardener/gardener-extension-provider-gdc/pkg/errors"
 )
 
 const (
@@ -108,12 +109,12 @@ func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, bastion *exte
 
 	_, err = createOrUpdateVirtualMachine(ctx, kubeClient, project, bastion, version.Image, image.Project, machineType)
 	if err != nil {
-		return fmt.Errorf("error creating virtual machine: %w", err)
+		return errors.DetermineError(fmt.Errorf("error creating virtual machine: %w", err))
 	}
 
 	bastionVMExternalAccess, err := createOrUpdateVirtualMachineExternalAccess(ctx, kubeClient, project, bastion)
 	if err != nil {
-		return fmt.Errorf("error creating virtual machine external access: %w", err)
+		return errors.DetermineError(fmt.Errorf("error creating virtual machine external access: %w", err))
 	}
 
 	err = createOrUpdateProjectNetworkPolicy(ctx, kubeClient, project, bastion)

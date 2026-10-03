@@ -272,7 +272,7 @@ func (a *actuator) createShootVMSubnets(ctx context.Context, globalKubeClient cl
 
 	_, err := reconcileRootSubnet(ctx, globalKubeClient, zonalKubeClients, infrastructure, infraConfig, serviceAccount, seedName)
 	if err != nil {
-		return nil, fmt.Errorf("error creating infrastructure node subnet %q (project: %s, nodeCIDR: %s): %v",
+		return nil, fmt.Errorf("error creating infrastructure node subnet %q (project: %s, nodeCIDR: %s): %w",
 			infrastructure.Name, serviceAccount.Project, infraConfig.Networks.NodeCIDR, err)
 	}
 	// if infraRootSubnet can be created, create zoneSubnet inherit from that
@@ -282,7 +282,7 @@ func (a *actuator) createShootVMSubnets(ctx context.Context, globalKubeClient cl
 		zoneSubnetName := infrastructure.Name + "-" + zone.Name
 		_, err := reconcileGlobalSubnet(ctx, globalKubeClient, zonalKubeClients, &zone.Name, zone.CIDR, infrastructure, infraConfig, serviceAccount)
 		if err != nil {
-			return nil, fmt.Errorf("error creating infrastructure zone subnet %q (zone: %s, cidr: %s): %v",
+			return nil, fmt.Errorf("error creating infrastructure zone subnet %q (zone: %s, cidr: %s): %w",
 				zoneSubnetName, zone.Name, zone.CIDR, err)
 		}
 
@@ -296,7 +296,7 @@ func (a *actuator) createShootVMSubnets(ctx context.Context, globalKubeClient cl
 		zoneNetworkSubnetName := "z-" + infrastructure.Name + "-" + zone.Name
 		zoneNetworkSubnet, err := ReconcileZonalSubnet(ctx, zonalKubeClients[zone.Name], zone.CIDR, zoneNetworkSubnetName, zoneSubnetName, serviceAccount.Project)
 		if err != nil {
-			return nil, fmt.Errorf("error creating infrastructure zone network subnet %q (zone: %s, cidr: %s): %v",
+			return nil, fmt.Errorf("error creating infrastructure zone network subnet %q (zone: %s, cidr: %s): %w",
 				zoneNetworkSubnetName, zone.Name, zone.CIDR, err)
 		}
 
@@ -745,7 +745,14 @@ func deleteSubnet(ctx context.Context, kubeclient client.Client, namespace, subn
 	}
 
 	if err := kubeclient.Delete(ctx, nodeSubnet); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete global subnet %q: %v", subnetName, err)
+		wrappedErr := fmt.Errorf("failed to delete global subnet %q: %w", subnetName, err)
+		if strings.Contains(err.Error(), "children") {
+			return &reconciler.RequeueAfterError{
+				Cause:        wrappedErr,
+				RequeueAfter: defaultSubnetCreationTime,
+			}
+		}
+		return wrappedErr
 	}
 	return nil
 }
@@ -759,7 +766,14 @@ func deleteZonalSubnet(ctx context.Context, zonalKubeClient client.Client, names
 	}
 
 	if err := zonalKubeClient.Delete(ctx, nodeSubnet); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete zonal subnet %q: %v", subnetName, err)
+		wrappedErr := fmt.Errorf("failed to delete zonal subnet %q: %w", subnetName, err)
+		if strings.Contains(err.Error(), "children") {
+			return &reconciler.RequeueAfterError{
+				Cause:        wrappedErr,
+				RequeueAfter: defaultSubnetCreationTime,
+			}
+		}
+		return wrappedErr
 	}
 	return nil
 }
