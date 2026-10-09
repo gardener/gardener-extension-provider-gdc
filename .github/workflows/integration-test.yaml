@@ -63,7 +63,7 @@ jobs:
       # Sets up Go and registers the built-in Go problem matcher to automatically
       # surface any `go test` failures as GitHub Actions annotations.
       - name: Set up Go
-        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -82,7 +82,7 @@ jobs:
         run: |
           git fetch origin main
           mkdir -p /tmp/ci-bootstrap
-          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'verify_pr_head_at_comment_time'; then
+          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'should_skip_non_code_changes' && ! git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'docs_only_regex'; then
             git show origin/main:scripts/ci-common.sh > /tmp/ci-bootstrap/ci-common.sh
           else
             cp ./scripts/ci-common.sh /tmp/ci-bootstrap/ci-common.sh
