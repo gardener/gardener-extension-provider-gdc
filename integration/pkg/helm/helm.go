@@ -16,18 +16,18 @@ package helm
 
 import (
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/cli"
-	"helm.sh/helm/v3/pkg/getter"
-	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart"
+	"helm.sh/helm/v4/pkg/chart/loader"
+	"helm.sh/helm/v4/pkg/cli"
+	"helm.sh/helm/v4/pkg/getter"
+	"helm.sh/helm/v4/pkg/kube"
+	"helm.sh/helm/v4/pkg/release"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
@@ -52,8 +52,8 @@ type UninstallOptions struct {
 }
 
 // InstallOrUpgrade installs or upgrades a Helm chart.
-func InstallOrUpgrade(opts InstallOptions) (*release.Release, error) {
-	chart, err := loadChart(opts.ChartPath)
+func InstallOrUpgrade(opts InstallOptions) (release.Releaser, error) {
+	chrt, err := loadChart(opts.ChartPath)
 	if err != nil {
 		return nil, err
 	}
@@ -72,37 +72,39 @@ func InstallOrUpgrade(opts InstallOptions) (*release.Release, error) {
 
 	if len(releases) == 0 {
 		// Release does not exist, install it.
-		return installChart(actionConfig, chart, opts)
+		return installChart(actionConfig, chrt, opts)
 	}
 
 	// Release exists, upgrade it.
-	return upgradeChart(actionConfig, chart, opts)
+	return upgradeChart(actionConfig, chrt, opts)
 }
 
-func installChart(actionConfig *action.Configuration, chart *chart.Chart, opts InstallOptions) (*release.Release, error) {
+func installChart(actionConfig *action.Configuration, chrt chart.Charter, opts InstallOptions) (release.Releaser, error) {
 	installClient := action.NewInstall(actionConfig)
 	installClient.ReleaseName = opts.ReleaseName
 	installClient.Namespace = opts.Namespace
 	installClient.CreateNamespace = true
 	installClient.Timeout = opts.Timeout
+	installClient.WaitStrategy = kube.HookOnlyStrategy
 
-	release, err := installClient.Run(chart, opts.Values)
+	rel, err := installClient.Run(chrt, opts.Values)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run helm install: %w", err)
 	}
-	return release, nil
+	return rel, nil
 }
 
-func upgradeChart(actionConfig *action.Configuration, chart *chart.Chart, opts InstallOptions) (*release.Release, error) {
+func upgradeChart(actionConfig *action.Configuration, chrt chart.Charter, opts InstallOptions) (release.Releaser, error) {
 	upgradeClient := action.NewUpgrade(actionConfig)
 	upgradeClient.Namespace = opts.Namespace
 	upgradeClient.Timeout = opts.Timeout
+	upgradeClient.WaitStrategy = kube.HookOnlyStrategy
 
-	release, err := upgradeClient.Run(opts.ReleaseName, chart, opts.Values)
+	rel, err := upgradeClient.Run(opts.ReleaseName, chrt, opts.Values)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run helm upgrade: %w", err)
 	}
-	return release, nil
+	return rel, nil
 }
 
 // Uninstall removes a specified Helm release from a cluster.
@@ -113,7 +115,12 @@ func Uninstall(opts UninstallOptions) (*release.UninstallReleaseResponse, error)
 	}
 
 	uninstallClient := action.NewUninstall(actionConfig)
-	uninstallClient.Wait = opts.Wait
+	if opts.Wait {
+		uninstallClient.WaitStrategy = kube.LegacyStrategy
+		uninstallClient.Timeout = 5 * time.Minute
+	} else {
+		uninstallClient.WaitStrategy = kube.HookOnlyStrategy
+	}
 	uninstallClient.IgnoreNotFound = opts.IgnoreNotFound
 	res, err := uninstallClient.Run(opts.ReleaseName)
 	if err != nil {
@@ -128,10 +135,7 @@ func newActionConfig(kubeconfigPath, namespace string) (*action.Configuration, e
 	kubeConfigFlags.KubeConfig = &kubeconfigPath
 
 	actionConfig := new(action.Configuration)
-	// The log function is used by the Helm library to report status.
-	// For this testing library, printing to the standard logger is a reasonable default.
-	logf := log.Printf
-	if err := actionConfig.Init(kubeConfigFlags, namespace, os.Getenv("HELM_DRIVER"), logf); err != nil {
+	if err := actionConfig.Init(kubeConfigFlags, namespace, os.Getenv("HELM_DRIVER")); err != nil {
 		return nil, fmt.Errorf("failed to initialize Helm action configuration: %w", err)
 	}
 	return actionConfig, nil
@@ -144,7 +148,7 @@ func isRemoteChart(chartPath string) bool {
 	return isOCI || isHTTP || isHTTPS
 }
 
-func loadChart(chartPath string) (*chart.Chart, error) {
+func loadChart(chartPath string) (chart.Charter, error) {
 	if isRemoteChart(chartPath) {
 		settings := cli.New()
 		providers := getter.All(settings)
