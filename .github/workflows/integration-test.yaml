@@ -82,7 +82,7 @@ jobs:
         run: |
           git fetch origin main
           mkdir -p /tmp/ci-bootstrap
-          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'should_skip_non_code_changes' && ! git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'docs_only_regex'; then
+          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'zz_generated'; then
             git show origin/main:scripts/ci-common.sh > /tmp/ci-bootstrap/ci-common.sh
           else
             cp ./scripts/ci-common.sh /tmp/ci-bootstrap/ci-common.sh

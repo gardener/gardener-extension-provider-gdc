@@ -8,7 +8,6 @@ package v1alpha1
 import (
 	unsafe "unsafe"
 
-	v1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	conversion "k8s.io/apimachinery/pkg/conversion"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -339,11 +338,7 @@ func Convert_gdc_InfrastructureStatus_To_v1alpha1_InfrastructureStatus(in *gdc.I
 }
 
 func autoConvert_v1alpha1_MachineImage_To_gdc_MachineImage(in *MachineImage, out *gdc.MachineImage, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Project = in.Project
-	out.Version = in.Version
-	out.Image = in.Image
-	out.Architecture = (*string)(unsafe.Pointer(in.Architecture))
+	*out = *(*gdc.MachineImage)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -353,11 +348,7 @@ func Convert_v1alpha1_MachineImage_To_gdc_MachineImage(in *MachineImage, out *gd
 }
 
 func autoConvert_gdc_MachineImage_To_v1alpha1_MachineImage(in *gdc.MachineImage, out *MachineImage, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Project = in.Project
-	out.Version = in.Version
-	out.Image = in.Image
-	out.Architecture = (*string)(unsafe.Pointer(in.Architecture))
+	*out = *(*MachineImage)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -367,8 +358,7 @@ func Convert_gdc_MachineImage_To_v1alpha1_MachineImage(in *gdc.MachineImage, out
 }
 
 func autoConvert_v1alpha1_MachineImageFlavor_To_gdc_MachineImageFlavor(in *MachineImageFlavor, out *gdc.MachineImageFlavor, s conversion.Scope) error {
-	out.Capabilities = *(*v1beta1.Capabilities)(unsafe.Pointer(&in.Capabilities))
-	out.Image = in.Image
+	*out = *(*gdc.MachineImageFlavor)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -378,8 +368,7 @@ func Convert_v1alpha1_MachineImageFlavor_To_gdc_MachineImageFlavor(in *MachineIm
 }
 
 func autoConvert_gdc_MachineImageFlavor_To_v1alpha1_MachineImageFlavor(in *gdc.MachineImageFlavor, out *MachineImageFlavor, s conversion.Scope) error {
-	out.Capabilities = *(*v1beta1.Capabilities)(unsafe.Pointer(&in.Capabilities))
-	out.Image = in.Image
+	*out = *(*MachineImageFlavor)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -389,10 +378,7 @@ func Convert_gdc_MachineImageFlavor_To_v1alpha1_MachineImageFlavor(in *gdc.Machi
 }
 
 func autoConvert_v1alpha1_MachineImageVersion_To_gdc_MachineImageVersion(in *MachineImageVersion, out *gdc.MachineImageVersion, s conversion.Scope) error {
-	out.Version = in.Version
-	out.Image = in.Image
-	out.Architecture = (*string)(unsafe.Pointer(in.Architecture))
-	out.CapabilityFlavors = *(*[]gdc.MachineImageFlavor)(unsafe.Pointer(&in.CapabilityFlavors))
+	*out = *(*gdc.MachineImageVersion)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -402,10 +388,7 @@ func Convert_v1alpha1_MachineImageVersion_To_gdc_MachineImageVersion(in *Machine
 }
 
 func autoConvert_gdc_MachineImageVersion_To_v1alpha1_MachineImageVersion(in *gdc.MachineImageVersion, out *MachineImageVersion, s conversion.Scope) error {
-	out.Version = in.Version
-	out.Image = in.Image
-	out.Architecture = (*string)(unsafe.Pointer(in.Architecture))
-	out.CapabilityFlavors = *(*[]MachineImageFlavor)(unsafe.Pointer(&in.CapabilityFlavors))
+	*out = *(*MachineImageVersion)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -415,9 +398,7 @@ func Convert_gdc_MachineImageVersion_To_v1alpha1_MachineImageVersion(in *gdc.Mac
 }
 
 func autoConvert_v1alpha1_MachineImages_To_gdc_MachineImages(in *MachineImages, out *gdc.MachineImages, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Project = in.Project
-	out.Versions = *(*[]gdc.MachineImageVersion)(unsafe.Pointer(&in.Versions))
+	*out = *(*gdc.MachineImages)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -427,9 +408,7 @@ func Convert_v1alpha1_MachineImages_To_gdc_MachineImages(in *MachineImages, out 
 }
 
 func autoConvert_gdc_MachineImages_To_v1alpha1_MachineImages(in *gdc.MachineImages, out *MachineImages, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Project = in.Project
-	out.Versions = *(*[]MachineImageVersion)(unsafe.Pointer(&in.Versions))
+	*out = *(*MachineImages)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -439,12 +418,7 @@ func Convert_gdc_MachineImages_To_v1alpha1_MachineImages(in *gdc.MachineImages, 
 }
 
 func autoConvert_v1alpha1_NetworkConfig_To_gdc_NetworkConfig(in *NetworkConfig, out *gdc.NetworkConfig, s conversion.Scope) error {
-	out.ParentAddressPoolClaim = in.ParentAddressPoolClaim
-	out.NodeCIDR = in.NodeCIDR
-	out.ParentSubnet = in.ParentSubnet
-	out.ParentSubnetProject = in.ParentSubnetProject
-	out.ParentReference = (*gdc.SubnetReference)(unsafe.Pointer(in.ParentReference))
-	out.Zones = *(*[]gdc.Zone)(unsafe.Pointer(&in.Zones))
+	*out = *(*gdc.NetworkConfig)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -454,12 +428,7 @@ func Convert_v1alpha1_NetworkConfig_To_gdc_NetworkConfig(in *NetworkConfig, out 
 }
 
 func autoConvert_gdc_NetworkConfig_To_v1alpha1_NetworkConfig(in *gdc.NetworkConfig, out *NetworkConfig, s conversion.Scope) error {
-	out.ParentAddressPoolClaim = in.ParentAddressPoolClaim
-	out.NodeCIDR = in.NodeCIDR
-	out.ParentSubnet = in.ParentSubnet
-	out.ParentSubnetProject = in.ParentSubnetProject
-	out.ParentReference = (*SubnetReference)(unsafe.Pointer(in.ParentReference))
-	out.Zones = *(*[]Zone)(unsafe.Pointer(&in.Zones))
+	*out = *(*NetworkConfig)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -469,10 +438,7 @@ func Convert_gdc_NetworkConfig_To_v1alpha1_NetworkConfig(in *gdc.NetworkConfig, 
 }
 
 func autoConvert_v1alpha1_NetworkStatus_To_gdc_NetworkStatus(in *NetworkStatus, out *gdc.NetworkStatus, s conversion.Scope) error {
-	out.NodeAddressPoolClaim = in.NodeAddressPoolClaim
-	out.NodeCIDR = in.NodeCIDR
-	out.NodeSubnet = in.NodeSubnet
-	out.Zones = *(*[]gdc.Zones)(unsafe.Pointer(&in.Zones))
+	*out = *(*gdc.NetworkStatus)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -482,10 +448,7 @@ func Convert_v1alpha1_NetworkStatus_To_gdc_NetworkStatus(in *NetworkStatus, out 
 }
 
 func autoConvert_gdc_NetworkStatus_To_v1alpha1_NetworkStatus(in *gdc.NetworkStatus, out *NetworkStatus, s conversion.Scope) error {
-	out.NodeAddressPoolClaim = in.NodeAddressPoolClaim
-	out.NodeCIDR = in.NodeCIDR
-	out.NodeSubnet = in.NodeSubnet
-	out.Zones = *(*[]Zones)(unsafe.Pointer(&in.Zones))
+	*out = *(*NetworkStatus)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -495,11 +458,7 @@ func Convert_gdc_NetworkStatus_To_v1alpha1_NetworkStatus(in *gdc.NetworkStatus, 
 }
 
 func autoConvert_v1alpha1_OrgConfig_To_gdc_OrgConfig(in *OrgConfig, out *gdc.OrgConfig, s conversion.Scope) error {
-	out.OrgName = in.OrgName
-	out.GlobalManagementAPI = in.GlobalManagementAPI
-	out.RegistryURL = in.RegistryURL
-	out.CAData = in.CAData
-	out.Zones = *(*[]*gdc.ZoneEndpoints)(unsafe.Pointer(&in.Zones))
+	*out = *(*gdc.OrgConfig)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -509,11 +468,7 @@ func Convert_v1alpha1_OrgConfig_To_gdc_OrgConfig(in *OrgConfig, out *gdc.OrgConf
 }
 
 func autoConvert_gdc_OrgConfig_To_v1alpha1_OrgConfig(in *gdc.OrgConfig, out *OrgConfig, s conversion.Scope) error {
-	out.OrgName = in.OrgName
-	out.GlobalManagementAPI = in.GlobalManagementAPI
-	out.RegistryURL = in.RegistryURL
-	out.CAData = in.CAData
-	out.Zones = *(*[]*ZoneEndpoints)(unsafe.Pointer(&in.Zones))
+	*out = *(*OrgConfig)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -523,8 +478,7 @@ func Convert_gdc_OrgConfig_To_v1alpha1_OrgConfig(in *gdc.OrgConfig, out *OrgConf
 }
 
 func autoConvert_v1alpha1_Storage_To_gdc_Storage(in *Storage, out *gdc.Storage, s conversion.Scope) error {
-	out.ManagedDefaultStorageClass = (*bool)(unsafe.Pointer(in.ManagedDefaultStorageClass))
-	out.ManagedDefaultVolumeSnapshotClass = (*bool)(unsafe.Pointer(in.ManagedDefaultVolumeSnapshotClass))
+	*out = *(*gdc.Storage)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -534,8 +488,7 @@ func Convert_v1alpha1_Storage_To_gdc_Storage(in *Storage, out *gdc.Storage, s co
 }
 
 func autoConvert_gdc_Storage_To_v1alpha1_Storage(in *gdc.Storage, out *Storage, s conversion.Scope) error {
-	out.ManagedDefaultStorageClass = (*bool)(unsafe.Pointer(in.ManagedDefaultStorageClass))
-	out.ManagedDefaultVolumeSnapshotClass = (*bool)(unsafe.Pointer(in.ManagedDefaultVolumeSnapshotClass))
+	*out = *(*Storage)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -545,9 +498,7 @@ func Convert_gdc_Storage_To_v1alpha1_Storage(in *gdc.Storage, out *Storage, s co
 }
 
 func autoConvert_v1alpha1_SubnetReference_To_gdc_SubnetReference(in *SubnetReference, out *gdc.SubnetReference, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Namespace = (*string)(unsafe.Pointer(in.Namespace))
-	out.Type = gdc.ReferenceType(in.Type)
+	*out = *(*gdc.SubnetReference)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -557,9 +508,7 @@ func Convert_v1alpha1_SubnetReference_To_gdc_SubnetReference(in *SubnetReference
 }
 
 func autoConvert_gdc_SubnetReference_To_v1alpha1_SubnetReference(in *gdc.SubnetReference, out *SubnetReference, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Namespace = (*string)(unsafe.Pointer(in.Namespace))
-	out.Type = ReferenceType(in.Type)
+	*out = *(*SubnetReference)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -609,8 +558,7 @@ func Convert_gdc_WorkerStatus_To_v1alpha1_WorkerStatus(in *gdc.WorkerStatus, out
 }
 
 func autoConvert_v1alpha1_Zone_To_gdc_Zone(in *Zone, out *gdc.Zone, s conversion.Scope) error {
-	out.Name = in.Name
-	out.CIDR = in.CIDR
+	*out = *(*gdc.Zone)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -620,8 +568,7 @@ func Convert_v1alpha1_Zone_To_gdc_Zone(in *Zone, out *gdc.Zone, s conversion.Sco
 }
 
 func autoConvert_gdc_Zone_To_v1alpha1_Zone(in *gdc.Zone, out *Zone, s conversion.Scope) error {
-	out.Name = in.Name
-	out.CIDR = in.CIDR
+	*out = *(*Zone)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -631,9 +578,7 @@ func Convert_gdc_Zone_To_v1alpha1_Zone(in *gdc.Zone, out *Zone, s conversion.Sco
 }
 
 func autoConvert_v1alpha1_ZoneEndpoints_To_gdc_ZoneEndpoints(in *ZoneEndpoints, out *gdc.ZoneEndpoints, s conversion.Scope) error {
-	out.Name = in.Name
-	out.ManagementAPI = in.ManagementAPI
-	out.InfrastructureAPI = in.InfrastructureAPI
+	*out = *(*gdc.ZoneEndpoints)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -643,9 +588,7 @@ func Convert_v1alpha1_ZoneEndpoints_To_gdc_ZoneEndpoints(in *ZoneEndpoints, out 
 }
 
 func autoConvert_gdc_ZoneEndpoints_To_v1alpha1_ZoneEndpoints(in *gdc.ZoneEndpoints, out *ZoneEndpoints, s conversion.Scope) error {
-	out.Name = in.Name
-	out.ManagementAPI = in.ManagementAPI
-	out.InfrastructureAPI = in.InfrastructureAPI
+	*out = *(*ZoneEndpoints)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -655,8 +598,7 @@ func Convert_gdc_ZoneEndpoints_To_v1alpha1_ZoneEndpoints(in *gdc.ZoneEndpoints, 
 }
 
 func autoConvert_v1alpha1_Zones_To_gdc_Zones(in *Zones, out *gdc.Zones, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Subnet = in.Subnet
+	*out = *(*gdc.Zones)(unsafe.Pointer(in))
 	return nil
 }
 
@@ -666,8 +608,7 @@ func Convert_v1alpha1_Zones_To_gdc_Zones(in *Zones, out *gdc.Zones, s conversion
 }
 
 func autoConvert_gdc_Zones_To_v1alpha1_Zones(in *gdc.Zones, out *Zones, s conversion.Scope) error {
-	out.Name = in.Name
-	out.Subnet = in.Subnet
+	*out = *(*Zones)(unsafe.Pointer(in))
 	return nil
 }
 

@@ -153,7 +153,7 @@ should_skip_non_code_changes() {
     return 1
   fi
 
-  local non_code_regex='^(\.gitignore|\.dockerignore|\.golangci\.yaml|OWNERS.*|CODEOWNERS|LICENSE.*|NOTICE.*|VERSION|Makefile|.*\.md|docs/.*|\.github/.*|scripts/ci-common\.sh)$'
+  local non_code_regex='^(\.gitignore|\.dockerignore|\.golangci\.yaml|OWNERS.*|CODEOWNERS|LICENSE.*|NOTICE.*|VERSION|Makefile|.*\.md|docs/.*|\.github/.*|scripts/ci-common\.sh|.*zz_generated.*\.go)$'
   local pr_head_sha=""
   if [[ -f "${GITHUB_EVENT_PATH:-}" ]]; then
     pr_head_sha=$(jq -r '.pull_request.head.sha // empty' "${GITHUB_EVENT_PATH}")
