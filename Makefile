@@ -12,7 +12,7 @@ REPO_ROOT                         := $(shell dirname $(realpath $(lastword $(MAK
 IMAGE_REPOSITORY_PROVIDER         := $(REGISTRY)/gardener-extension-provider-gdch
 IMAGE_REPOSITORY_ADMISSION        := $(REGISTRY)/gardener-extension-admission-gdch
 IMAGE_REPOSITORY_AUTH_PLUGIN      := $(REGISTRY)/gdch-sa-auth-plugin
-VERSION                           ?= v0.1.0-dev
+VERSION                           ?= $(shell cat $(REPO_ROOT)/VERSION)
 IMAGE_TAG                         ?= $(VERSION)
 TARGET_PLATFORMS                  ?=
 DOCKER_PLATFORM_ARGS              := $(if $(TARGET_PLATFORMS),--platform=$(TARGET_PLATFORMS),)
