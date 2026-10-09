@@ -163,12 +163,11 @@ should_skip_non_code_changes() {
   fi
 
   # 1. Check if the entire PR diff against origin/main only touches non-code files
-  #    (excluding CI test scripts/workflows when they have not yet been tested).
+  #    (excluding runtime code, charts, Dockerfile, and ci-integration-test.sh).
   local pr_files
   pr_files=$(git diff --name-only "origin/main...${pr_head_sha}" 2>/dev/null || true)
   if [[ -n "${pr_files}" ]]; then
-    local docs_only_regex='^(\.gitignore|\.dockerignore|\.golangci\.yaml|OWNERS.*|CODEOWNERS|LICENSE.*|NOTICE.*|VERSION|Makefile|.*\.md|docs/.*|\.github/renovate\.json5)$'
-    if ! printf '%s\n' "${pr_files}" | grep -qvE "${docs_only_regex}"; then
+    if ! printf '%s\n' "${pr_files}" | grep -qvE "${non_code_regex}"; then
       echo "All files changed in PR (${pr_files//$'\n'/, }) are non-code files. Skipping integration test."
       return 0
     fi
