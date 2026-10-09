@@ -16,10 +16,12 @@
 package errors
 
 import (
+	stderrors "errors"
 	"regexp"
 
 	"github.com/gardener/gardener/extensions/pkg/util"
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
+	"github.com/gardener/gardener/pkg/controllerutils/reconciler"
 )
 
 var (
@@ -48,6 +50,25 @@ var (
 	}
 )
 
+// DetermineError classifies provider errors into Gardener ErrorCodes while preserving
+// *reconciler.RequeueAfterError as the outer error type so Gardener's ReconcileErr
+// requeues after RequeueAfter instead of falling back to controller-runtime exponential backoff.
 func DetermineError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if direct, ok := err.(*reconciler.RequeueAfterError); ok {
+		return &reconciler.RequeueAfterError{
+			Cause:        util.DetermineError(direct.Cause, knownCodes),
+			RequeueAfter: direct.RequeueAfter,
+		}
+	}
+	var requeueAfter *reconciler.RequeueAfterError
+	if stderrors.As(err, &requeueAfter) {
+		return &reconciler.RequeueAfterError{
+			Cause:        util.DetermineError(err, knownCodes),
+			RequeueAfter: requeueAfter.RequeueAfter,
+		}
+	}
 	return util.DetermineError(err, knownCodes)
 }

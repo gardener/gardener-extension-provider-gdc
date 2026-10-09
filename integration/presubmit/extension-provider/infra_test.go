@@ -244,7 +244,7 @@ func (f *infraTestFixture) testSingleZoneInfrastructureCreation(ctx context.Cont
 	zones := splitNodeCIDRToZones(t, nodeCIDR, []string{*zone})
 
 	// Arrange: Infrastructure with single zone network configuration
-	infraName := "sz-infra-" + *commitHash
+	infraName := fmt.Sprintf("sz-infra-%s-%s", *commitHash, rand.String(5))
 	infra := &extensionsv1alpha1.Infrastructure{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      infraName,
@@ -385,7 +385,7 @@ func (f *infraTestFixture) testMultiZoneInfrastructureCreation(ctx context.Conte
 	zones := splitNodeCIDRToZones(t, nodeCIDR, f.availableZones[:2])
 
 	// Arrange: Infrastructure with multi-zone network configuration
-	infraName := "mz-infra-" + *commitHash
+	infraName := fmt.Sprintf("mz-infra-%s-%s", *commitHash, rand.String(5))
 	infra := &extensionsv1alpha1.Infrastructure{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      infraName,
@@ -552,7 +552,7 @@ func (f *infraTestFixture) testMultiZoneInfrastructureCloudNAT(ctx context.Conte
 	zones := splitNodeCIDRToZones(t, nodeCIDR, f.availableZones[:2])
 
 	// Arrange: Infrastructure with Multizon setup and CloudNAT enabled
-	infraName := "mz-cloudnat-infra-" + *commitHash
+	infraName := fmt.Sprintf("mz-cloudnat-infra-%s-%s", *commitHash, rand.String(5))
 	infra := &extensionsv1alpha1.Infrastructure{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      infraName,

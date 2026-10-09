@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 Google LLC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Presubmit Integration Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'OWNERS*'
+      - 'CODEOWNERS'
+      - 'LICENSE*'
+      - 'NOTICE*'
+      - '.gitignore'
+      - '.github/renovate.json5'
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull Request number to test (leave empty to test the selected branch)'
+        required: false
+        type: string
+      controllers:
+        description: 'Comma-separated list of controllers/webhooks to run (leave empty to run all)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  integration-test:
+    name: Extension Provider Integration Test (GDC Staging)
+    if: >
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/test-integration'))
+    runs-on: ubuntu-latest
+    environment: gdc-staging
+    timeout-minutes: 50
+    concurrency:
+      group: ${{ github.workflow }}-${{ inputs.pr_number || github.event.issue.number || github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      packages: write
+      checks: write
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # Sets up Go and registers the built-in Go problem matcher to automatically
+      # surface any `go test` failures as GitHub Actions annotations.
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # Verifies author/commenter authorization strictly against origin/main
+      # (without exposing GDC secrets), stages trusted CI scripts and the
+      # compiled token-helper binary in /tmp/ci-trusted, and checks out + merges
+      # origin/main into the target PR when triggered via /test-integration or workflow_dispatch.
+      - name: Verify CI Preconditions
+        id: preconditions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          CHECK_NAME: Extension Provider Integration Test (GDC Staging)
+          CONTROLLERS: ${{ inputs.controllers }}
+        run: |
+          git fetch origin main
+          mkdir -p /tmp/ci-bootstrap
+          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'verify_pr_head_at_comment_time'; then
+            git show origin/main:scripts/ci-common.sh > /tmp/ci-bootstrap/ci-common.sh
+          else
+            cp ./scripts/ci-common.sh /tmp/ci-bootstrap/ci-common.sh
+          fi
+          source /tmp/ci-bootstrap/ci-common.sh
+          verify_and_prepare_ci
+
+      - name: Log in to ghcr.io
+        if: steps.preconditions.outputs.should_run == 'true'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Runs the staged ci-integration-test.sh script from /tmp/ci-trusted, which installs
+      # the gdcloud CLI from GDC Staging, builds and pushes the PR container image to ghcr.io,
+      # runs the integration test suite, and cleans up the temporary ghcr.io image on exit.
+      - name: Run Extension Provider Integration Test
+        if: steps.preconditions.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECK_NAME: Extension Provider Integration Test (GDC Staging)
+          IMAGE_REPOSITORY_PROVIDER: ghcr.io/${{ github.repository }}/gardener-extension-provider-gdch
+          GDC_EXTENSION_SERVICE_ACCOUNT_KEY: ${{ secrets.GDC_EXTENSION_SERVICE_ACCOUNT_KEY }}
+        run: bash "${CI_TRUSTED_DIR}/scripts/ci-integration-test.sh"

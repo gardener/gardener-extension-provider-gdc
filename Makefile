@@ -4,14 +4,14 @@
 
 export GOFLAGS ?= -mod=mod
 
-REGISTRY                          := europe-docker.pkg.dev/gardener-project/public
+REGISTRY                          ?= europe-docker.pkg.dev/gardener-project/public
 EXECUTABLE_PROVIDER               := bin/gardener-extension-provider-gdch
 EXECUTABLE_ADMISSION              := bin/gardener-extension-admission-gdch
 EXECUTABLE_AUTH_PLUGIN            := bin/gdch-sa-auth-plugin
 REPO_ROOT                         := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
-IMAGE_REPOSITORY_PROVIDER         := $(REGISTRY)/gardener-extension-provider-gdch
-IMAGE_REPOSITORY_ADMISSION        := $(REGISTRY)/gardener-extension-admission-gdch
-IMAGE_REPOSITORY_AUTH_PLUGIN      := $(REGISTRY)/gdch-sa-auth-plugin
+IMAGE_REPOSITORY_PROVIDER         ?= $(REGISTRY)/gardener-extension-provider-gdch
+IMAGE_REPOSITORY_ADMISSION        ?= $(REGISTRY)/gardener-extension-admission-gdch
+IMAGE_REPOSITORY_AUTH_PLUGIN      ?= $(REGISTRY)/gdch-sa-auth-plugin
 VERSION                           ?= $(shell cat $(REPO_ROOT)/VERSION)
 IMAGE_TAG                         ?= $(VERSION)
 TARGET_PLATFORMS                  ?=
@@ -69,7 +69,7 @@ check: generate format $(GOLANGCI_LINT)
 	@echo "Running golangci-lint..."
 	@$(GOLANGCI_LINT) run --config=./.golangci.yaml ./cmd/... ./pkg/... ./gdc/... ./gdc-sa-auth-plugin/...
 	@echo "Running go vet..."
-	@go vet ./cmd/... ./pkg/... ./gdc/... ./gdc-sa-auth-plugin/...
+	@go vet ./cmd/... ./pkg/... ./gdc/... ./gdc-sa-auth-plugin/... ./integration/...
 
 .PHONY: format
 format: $(GOIMPORTS)
@@ -119,9 +119,16 @@ test: unittests
 unittests: $(GINKGO)
 	@go test -race -timeout=3m ./pkg/... ./gdc/... ./gdc-sa-auth-plugin/... ./cmd/...
 
-.PHONY: docker-images
-docker-images:
+.PHONY: test-integration
+test-integration:
+	@./scripts/ci-integration-test.sh
+
+.PHONY: docker-image-provider
+docker-image-provider:
 	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_PROVIDER):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-provider-gdch .
+
+.PHONY: docker-images
+docker-images: docker-image-provider
 	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_ADMISSION):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-admission-gdch .
 	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_AUTH_PLUGIN):$(IMAGE_TAG) -f Dockerfile --target gdch-sa-auth-plugin .
 
@@ -130,12 +137,14 @@ help: ## Display available targets
 	@echo "Gardener Extension Provider GDC Build System"
 	@echo "============================================"
 	@echo "Available make targets:"
-	@echo "  make format        - Formats all Go source files with goimports"
-	@echo "  make check         - Runs code linters (golangci-lint, go vet)"
-	@echo "  make test          - Runs unit test suite across all packages"
-	@echo "  make unittests     - Alias for test"
-	@echo "  make build-local   - Builds binaries locally in current environment"
-	@echo "  make release       - Builds cross-compiled release binaries"
-	@echo "  make docker-images - Builds multi-stage Docker images (TARGET_PLATFORMS=linux/amd64)"
-	@echo "  make tidy          - Runs go mod tidy"
-	@echo "  make clean         - Cleans built binaries and tools cache"
+	@echo "  make format                - Formats all Go source files with goimports"
+	@echo "  make check                 - Runs code linters (golangci-lint, go vet)"
+	@echo "  make test                  - Runs unit test suite across all packages"
+	@echo "  make unittests             - Alias for test"
+	@echo "  make test-integration      - Runs presubmit integration tests against GDC"
+	@echo "  make build-local           - Builds binaries locally in current environment"
+	@echo "  make release               - Builds cross-compiled release binaries"
+	@echo "  make docker-image-provider - Builds provider Docker image"
+	@echo "  make docker-images         - Builds multi-stage Docker images (TARGET_PLATFORMS=linux/amd64)"
+	@echo "  make tidy                  - Runs go mod tidy"
+	@echo "  make clean                 - Cleans built binaries and tools cache"

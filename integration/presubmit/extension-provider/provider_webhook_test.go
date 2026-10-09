@@ -49,6 +49,9 @@ type extensionProviderWebhookTestFixture struct {
 func (f *extensionProviderWebhookTestFixture) test(t *testing.T) {
 	ctx := context.Background()
 
+	// Create a dedicated, isolated vcluster client for this subtest
+	f.vucClient = f.NewVClusterClient(t)
+
 	// Setup common environment
 	f.setup(t, ctx)
 
