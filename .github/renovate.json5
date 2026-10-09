@@ -47,6 +47,7 @@
         '!sigs.k8s.io/**',
         '!github.com/gardener/etcd-druid/**',
         '!github.com/prometheus-operator/**',
+        '!helm.sh/helm/**',
       ],
       groupName: 'non-gardener-dependencies',
       matchUpdateTypes: ['major'],

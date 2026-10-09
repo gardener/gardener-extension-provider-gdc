@@ -34,6 +34,9 @@ linters:
           - staticcheck
         text: 'SA1019: version.Classification is deprecated'
       - linters:
+          - staticcheck
+        text: 'SA1019: .*aws-sdk-go.* is deprecated'
+      - linters:
           - errcheck
         text: 'Error return value of'
       - path: (.+)\.go$
