@@ -46,7 +46,7 @@ func Raw(
 	context.AuthInfo = serviceAccountName
 	contextName := fmt.Sprintf("%s@%s", serviceAccountName, clusterName)
 
-	serviceAccountJson, err := json.Marshal(serviceAccount)
+	serviceAccountJson, err := json.Marshal(serviceAccount) // #nosec G117 -- intentional serialization of service account credentials for kubeconfig exec plugin
 	if err != nil {
 		return "", fmt.Errorf("failed to decode serviceAccount: %w", err)
 	}

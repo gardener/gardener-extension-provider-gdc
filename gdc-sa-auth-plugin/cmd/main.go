@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/pkg/apis/clientauthentication/v1beta1"
@@ -155,7 +156,7 @@ func (cw *credentialWriter) Write() error {
 }
 
 func readFile(path string) ([]byte, error) {
-	bytes, err := os.ReadFile(path)
+	bytes, err := os.ReadFile(filepath.Clean(path)) // #nosec G304 -- trusted credential file path from CLI flag
 	if err != nil {
 		return nil, fmt.Errorf("read file %q: %w", path, err)
 	}

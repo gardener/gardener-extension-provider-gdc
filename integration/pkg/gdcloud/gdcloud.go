@@ -50,7 +50,7 @@ func NewTestingClient(caDataPath, serviceaccountPath string, consoleURL string) 
 
 	defer func() {
 		if err != nil {
-			os.RemoveAll(configDir)
+			_ = os.RemoveAll(configDir)
 		}
 	}()
 
@@ -84,7 +84,7 @@ func (c *TestingClient) Exec(args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot locate gdcloud binary: %w", err)
 	}
-	cmd := exec.Command(executable, args...)
+	cmd := exec.Command(executable, args...) // #nosec G204 -- test helper invoking resolved gdcloud CLI binary
 	// Override HOME and XDG_CONFIG_HOME to guarantee hermetic testing.
 	// This forces gdcloud to write its configuration to our isolated test directory
 	// instead of mutating the global ~/.config/gdcloud state. We override both

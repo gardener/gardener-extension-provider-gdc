@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/auth"
 )
@@ -59,7 +60,7 @@ func mintSTSToken(saPath, caPath, audience string) (string, error) {
 
 	// Read and parse the GDC ProjectServiceAccount JSON credential file, which
 	// contains the ES256 private key, key ID, project, service account name, and STS token URI.
-	saBytes, err := os.ReadFile(saPath)
+	saBytes, err := os.ReadFile(filepath.Clean(saPath)) // #nosec G304 -- trusted CLI flag path in test helper
 	if err != nil {
 		return "", fmt.Errorf("read service account file %q: %w", saPath, err)
 	}
@@ -71,7 +72,7 @@ func mintSTSToken(saPath, caPath, audience string) (string, error) {
 
 	// Read the GDC Root CA certificate so the STS HTTPS client can verify the
 	// GDC ServiceIdentityServer TLS certificate.
-	caBytes, err := os.ReadFile(caPath)
+	caBytes, err := os.ReadFile(filepath.Clean(caPath)) // #nosec G304 -- trusted CLI flag path in test helper
 	if err != nil {
 		return "", fmt.Errorf("read CA certificate file %q: %w", caPath, err)
 	}

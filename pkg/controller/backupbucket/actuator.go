@@ -263,7 +263,7 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 		return fmt.Errorf("failed to enode a gdch-config json: %w", err)
 	}
 
-	serviceAccountJSONData, err := json.Marshal(bucketClient.serviceAccount)
+	serviceAccountJSONData, err := json.Marshal(bucketClient.serviceAccount) // #nosec G117 -- intentional serialization of service account credentials for backup secret
 	if err != nil {
 		return fmt.Errorf("failed to enode a service account json: %w", err)
 	}
