@@ -13,24 +13,26 @@
 # limitations under the License.
 
 images:
-- name: cloud-controller-manager
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/cloud-controller-manager
-  tag: v1
-- name: machine-controller-manager-provider-gdch
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/machine-controller-manager
-  tag: v1
-- name: csi-driver
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/csi-driver
-  tag: v1
-- name: csi-provisioner
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-external-provisioner
-  tag: v1
-- name: csi-attacher
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-external-attacher
-  tag: v1
-- name: csi-liveness-probe
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-livenessprobe
-  tag: v1
-- name: csi-node-driver-registrar
-  repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-node-driver-registrar
-  tag: v1
+  - name: cloud-controller-manager
+    repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/cloud-controller-manager-gdch
+    tag: v0.5.4
+    sourceRepository: github.com/GoogleCloudPlatform/cloud-provider-gdc
+  - name: machine-controller-manager-provider-gdch
+    repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/machine-controller-manager-provider-gdch
+    tag: v0.5.4
+    sourceRepository: github.com/gardener/machine-controller-manager-provider-gdc
+  - name: csi-driver
+    repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/csi-driver
+    tag: v1
+  - name: csi-provisioner
+    repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-external-provisioner
+    tag: v1
+  - name: csi-attacher
+    repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-external-attacher
+    tag: v1
+  - name: csi-liveness-probe
+    repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-livenessprobe
+    tag: v1
+  - name: csi-node-driver-registrar
+    repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/origin-csi-node-driver-registrar
+    tag: v1
