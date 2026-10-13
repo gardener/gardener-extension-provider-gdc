@@ -30,6 +30,7 @@ import (
 	"k8s.io/utils/clock"
 )
 
+// #nosec G101 -- RFC 8693 OAuth 2.0 token-type URN constants, not credentials
 const (
 	tokenExchangeType       = "urn:ietf:params:oauth:token-type:token-exchange"
 	accessTokenType         = "urn:ietf:params:oauth:token-type:access_token"
@@ -154,7 +155,7 @@ func (ts *stsTokenSource) Token() (*oauth2.Token, error) {
 		}
 		var readErr error
 		respBody, readErr = io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("read fetched token: %w", readErr)
 		}

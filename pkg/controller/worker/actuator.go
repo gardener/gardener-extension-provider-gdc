@@ -297,9 +297,9 @@ func (w *workerDelegate) generateMachineDeployments(ctx context.Context) error {
 
 	for _, pool := range w.worker.Spec.Pools {
 		zones := pool.Zones
-		zoneLen := int32(len(zones))
+		zoneLen := int32(len(zones)) // #nosec G115 -- worker pool zone slice length is bounded and fits in int32
 		for zoneIndex, zone := range zones {
-			zoneIdx := int32(zoneIndex)
+			zoneIdx := int32(zoneIndex) // #nosec G115 -- zoneIndex is bounded by len(zones)
 			additionalData := []string{}
 			deploymentName, err := w.determineDeploymentName(ctx, pool, zoneIdx)
 			if err != nil {
