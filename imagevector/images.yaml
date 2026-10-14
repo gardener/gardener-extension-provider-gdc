@@ -17,10 +17,30 @@ images:
     repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/cloud-controller-manager-gdch
     tag: v0.5.5
     sourceRepository: github.com/GoogleCloudPlatform/cloud-provider-gdc
+    labels:
+    - name: gardener.cloud/cve-categorisation
+      value:
+        network_exposure: protected
+        authentication_enforced: false
+        user_interaction: gardener-operator
+        confidentiality_requirement: high
+        integrity_requirement: high
+        availability_requirement: low
+      signing: false
   - name: machine-controller-manager-provider-gdch
     repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/machine-controller-manager-provider-gdch
     tag: v0.5.7
     sourceRepository: github.com/gardener/machine-controller-manager-provider-gdc
+    labels:
+      - name: gardener.cloud/cve-categorisation
+        value:
+          network_exposure: protected
+          authentication_enforced: false
+          user_interaction: gardener-operator
+          confidentiality_requirement: high
+          integrity_requirement: high
+          availability_requirement: low
+        signing: false
   - name: csi-driver
     repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/csi-driver
     tag: v1
