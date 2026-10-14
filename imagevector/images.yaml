@@ -19,7 +19,7 @@ images:
     sourceRepository: github.com/GoogleCloudPlatform/cloud-provider-gdc
   - name: machine-controller-manager-provider-gdch
     repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/machine-controller-manager-provider-gdch
-    tag: v0.5.5
+    tag: v0.5.7
     sourceRepository: github.com/gardener/machine-controller-manager-provider-gdc
   - name: csi-driver
     repository: myinstance-sapbtp.org-1.zone1.google.gdch.test/gardener/csi-driver
