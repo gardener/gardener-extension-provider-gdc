@@ -8,6 +8,7 @@ aliases:
   - fuzzdota
   - matthias-horne
   - gardener-ci-robot
+  - renovate[bot]
   gardener-extension-provider-gdc-approvers:
   - AndreasBurger
   - dilipkumar2k6
@@ -15,3 +16,4 @@ aliases:
   - fuzzdota
   - matthias-horne
   - gardener-ci-robot
+  - renovate[bot]
