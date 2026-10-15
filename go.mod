@@ -46,8 +46,8 @@ require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/distribution/reference v0.6.0
 	github.com/gardener/etcd-druid/api v0.38.2
-	github.com/gardener/gardener v1.153.0
-	github.com/gardener/gardener/pkg/apis v1.153.0
+	github.com/gardener/gardener v1.153.1
+	github.com/gardener/gardener/pkg/apis v1.153.1
 	github.com/gardener/machine-controller-manager v0.63.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/googlecloudplatform/google-distributed-cloud-apis v0.0.0-20260824201624-0c18fa0ddc04
