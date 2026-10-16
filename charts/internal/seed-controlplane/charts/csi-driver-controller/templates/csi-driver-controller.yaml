@@ -102,6 +102,8 @@ spec:
             - "--kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
             - "--retry-interval-max=1m"
             - "--extra-create-metadata"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=200"
             {{- if $hasMultiZoneSupport }}
             - "--feature-gates=Topology=true"
             {{- end }}
@@ -127,6 +129,8 @@ spec:
             - "--timeout=3m"
             - "--kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
             - "--retry-interval-max=1m"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=200"
           env:
             - name: ADDRESS
               value: /var/lib/csi/sockets/pluginproxy/csi.sock
@@ -149,6 +153,8 @@ spec:
           - --leader-election
           - --leader-election-namespace=kube-system
           - --snapshot-name-prefix=snapshot
+          - --kube-api-qps=100
+          - --kube-api-burst=200
           securityContext:
             allowPrivilegeEscalation: false
           env:
@@ -172,6 +178,8 @@ spec:
           - "--timeout=300s"
           - "--kubeconfig=/var/run/secrets/gardener.cloud/shoot/generic-kubeconfig/kubeconfig"
           - "--v=5"
+          - "--kube-api-qps=100"
+          - "--kube-api-burst=200"
           securityContext:
             allowPrivilegeEscalation: false
           env:
