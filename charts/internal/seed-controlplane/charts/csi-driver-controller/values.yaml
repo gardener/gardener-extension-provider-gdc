@@ -33,28 +33,28 @@ images:
 resources:
   driver:
     requests:
-      cpu: 10m
-      memory: 50Mi
+      cpu: 50m
+      memory: 100Mi
   provisioner:
     requests:
-      cpu: 11m
-      memory: 32Mi
+      cpu: 50m
+      memory: 100Mi
   attacher:
     requests:
-      cpu: 10m
-      memory: 50Mi
+      cpu: 50m
+      memory: 100Mi
   livenessProbe:
     requests:
       cpu: 10m
       memory: 50Mi
   snapshotter:
     requests:
-      cpu: 10m
-      memory: 32Mi
+      cpu: 50m
+      memory: 100Mi
   resizer:
     requests:
-      cpu: 10m
-      memory: 32Mi
+      cpu: 50m
+      memory: 100Mi
 
 csiSnapshotController:
   replicas: 1
