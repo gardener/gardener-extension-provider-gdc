@@ -46,6 +46,12 @@ import (
 
 const (
 	disksize = "16Gi"
+	// bastionVMStartupTimeout is the maximum duration a Bastion VirtualMachine may remain in a
+	// non-Running state (such as "Starting" when its KubeVirt virt-launcher pod is stuck in
+	// "Scheduling" on a wedged baremetal node) before BastionController fails over to the next
+	// configured zone in InfrastructureConfig.Networks.Zones. A healthy Bastion VM typically
+	// transitions from Starting to Running in ~25-45 seconds.
+	bastionVMStartupTimeout = 2 * time.Minute
 )
 
 // Reconcile reconciles a bastion CR to create a bastion VM.
@@ -72,13 +78,7 @@ func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, bastion *exte
 	}
 
 	if providerStatus == nil {
-		bytes, err := json.Marshal(&providerStatusRaw{Zone: zone})
-		if err != nil {
-			return fmt.Errorf("error marshalling provider status: %w", err)
-		}
-		patch := client.MergeFrom(bastion.DeepCopy())
-		bastion.Status.ProviderStatus = &runtime.RawExtension{Raw: bytes}
-		if err := a.client.Status().Patch(ctx, bastion, patch); err != nil {
+		if err := a.patchProviderStatusZone(ctx, bastion, zone); err != nil {
 			return fmt.Errorf("failed to store status.providerStatus for zone: %s :%w", zone, err)
 		}
 	}
@@ -107,8 +107,14 @@ func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, bastion *exte
 		return fmt.Errorf("error getting machine type: %w", err)
 	}
 
-	_, err = createOrUpdateVirtualMachine(ctx, kubeClient, project, bastion, version.Image, image.Project, machineType)
+	vm, err := createOrUpdateVirtualMachine(ctx, kubeClient, project, bastion, version.Image, image.Project, machineType)
 	if err != nil {
+		// If the Bastion VM is stuck in Starting (or entered a terminal error state) in the current zone
+		// and additional zones are configured on the Shoot, clean up the stuck resources in this zone and
+		// rotate status.providerStatus.zone to the next zone so the next reconcile provisions on a healthy zone.
+		if failoverErr := a.failoverBastionZoneIfStuck(ctx, log, kubeClient, project, bastion, cluster, cp, zone, vm); failoverErr != nil {
+			return errors.DetermineError(failoverErr)
+		}
 		return errors.DetermineError(fmt.Errorf("error creating virtual machine: %w", err))
 	}
 
@@ -423,24 +429,119 @@ func getGDCHMachineImage(images []gardencorev1beta1.MachineImage, arch string, g
 
 // getBastionZone returns the zone in the providerStatus or the first zone in infrastructure config
 func getBastionZone(cluster *controller.Cluster, providerStatus *providerStatusRaw) (string, error) {
-	if providerStatus != nil {
+	if providerStatus != nil && providerStatus.Zone != "" {
 		return providerStatus.Zone, nil
 	}
 
+	zones, err := getBastionZones(cluster)
+	if err != nil {
+		return "", err
+	}
+	if len(zones) > 0 {
+		return zones[0], nil
+	}
+	return "", nil
+}
+
+// getBastionZones extracts all non-empty zone names from the Shoot's InfrastructureConfig.Networks.Zones.
+func getBastionZones(cluster *controller.Cluster) ([]string, error) {
 	infrastructureConfig := &apisgdc.InfrastructureConfig{}
 	if cluster.Shoot == nil || cluster.Shoot.Spec.Provider.InfrastructureConfig == nil {
-		return "", fmt.Errorf("InfrastructureConfig is nil")
+		return nil, fmt.Errorf("InfrastructureConfig is nil")
 	}
 
 	err := json.Unmarshal(cluster.Shoot.Spec.Provider.InfrastructureConfig.Raw, infrastructureConfig)
 	if err != nil {
-		return "", fmt.Errorf("error unmarshalling provider status: %w", err)
+		return nil, fmt.Errorf("error unmarshalling provider status: %w", err)
 	}
 
-	if len(infrastructureConfig.Networks.Zones) > 0 {
-		return infrastructureConfig.Networks.Zones[0].Name, nil
+	var zones []string
+	for _, z := range infrastructureConfig.Networks.Zones {
+		if z.Name != "" {
+			zones = append(zones, z.Name)
+		}
 	}
-	return "", nil
+	return zones, nil
+}
+
+// patchProviderStatusZone persists the selected zone in bastion.Status.ProviderStatus so subsequent
+// Reconcile and Delete calls target the same zone (or the newly selected failover zone).
+func (a *actuator) patchProviderStatusZone(ctx context.Context, bastion *extensionsv1alpha1.Bastion, zone string) error {
+	bytes, err := json.Marshal(&providerStatusRaw{Zone: zone})
+	if err != nil {
+		return fmt.Errorf("error marshalling provider status: %w", err)
+	}
+	patch := client.MergeFrom(bastion.DeepCopy())
+	bastion.Status.ProviderStatus = &runtime.RawExtension{Raw: bytes}
+	return a.client.Status().Patch(ctx, bastion, patch)
+}
+
+// failoverBastionZoneIfStuck checks whether the Bastion VirtualMachine in currentZone is stuck in a
+// non-Running state (either exceeding bastionVMStartupTimeout while "Starting" on a wedged baremetal
+// host, or in a terminal error state such as CrashLoopBackOff, ErrorConfiguration, or DiskError).
+// When multiple zones are available in InfrastructureConfig.Networks.Zones, it deletes the stuck
+// resources in currentZone, updates bastion.Status.ProviderStatus.Zone to the next zone that has a
+// valid OrgConfig endpoint, and returns a short RequeueAfterError (5s) to trigger provisioning in
+// the new zone.
+func (a *actuator) failoverBastionZoneIfStuck(
+	ctx context.Context,
+	log logr.Logger,
+	kubeClient client.Client,
+	project string,
+	bastion *extensionsv1alpha1.Bastion,
+	cluster *controller.Cluster,
+	cp *apisgdc.CloudProfileConfig,
+	currentZone string,
+	vm *vmv1.VirtualMachine,
+) error {
+	if vm == nil || vm.Status.State == vmv1.VirtualMachineStateRunning {
+		return nil
+	}
+	stuck := (!vm.CreationTimestamp.IsZero() && time.Since(vm.CreationTimestamp.Time) > bastionVMStartupTimeout) ||
+		vm.Status.State == vmv1.VirtualMachineStateCrashLoopBackoff ||
+		vm.Status.State == vmv1.VirtualMachineStateErrorConfiguration ||
+		vm.Status.State == vmv1.VirtualMachineStateDiskError
+	if !stuck {
+		return nil
+	}
+
+	zones, err := getBastionZones(cluster)
+	if err != nil {
+		return err
+	}
+	if len(zones) <= 1 {
+		return nil
+	}
+
+	// Round-robin to the next configured zone in InfrastructureConfig.Networks.Zones that has a valid OrgConfig entry.
+	currentIdx := slices.Index(zones, currentZone)
+	for offset := 1; offset < len(zones); offset++ {
+		nextZone := zones[(currentIdx+offset)%len(zones)]
+		if _, err := getOrgConfig(cp, nextZone); err != nil {
+			continue
+		}
+		log.Info("Bastion VirtualMachine stuck in non-Running state, failing over to next zone",
+			"bastion", bastion.Name,
+			"state", vm.Status.State,
+			"fromZone", currentZone,
+			"toZone", nextZone,
+		)
+		// Best-effort cleanup of the stuck Bastion resources in currentZone before switching zones
+		// so we do not leave orphaned VMs, disks, or external access objects behind.
+		_ = deleteProjectNetworkPolicy(ctx, kubeClient, project, bastion)
+		_ = deleteVirtualMachineExternalAccess(ctx, kubeClient, project, bastion)
+		_ = deleteVirtualMachine(ctx, kubeClient, project, bastion)
+		_ = deleteVirtualMachineDisk(ctx, kubeClient, project, bastion)
+		_ = deleteSetupScriptSecret(ctx, kubeClient, project, bastion)
+		if err := a.patchProviderStatusZone(ctx, bastion, nextZone); err != nil {
+			return fmt.Errorf("failed to update status.providerStatus for failover zone %s: %w", nextZone, err)
+		}
+		return &reconcilerutils.RequeueAfterError{
+			Cause:        fmt.Errorf("bastion VirtualMachine stuck in state %q in zone %q, failing over to zone %q", vm.Status.State, currentZone, nextZone),
+			RequeueAfter: 5 * time.Second,
+		}
+	}
+	return nil
 }
 
 func getOrgConfig(cp *apisgdc.CloudProfileConfig, bastionZone string) (*gdcclient.OrgClusterConfig, error) {

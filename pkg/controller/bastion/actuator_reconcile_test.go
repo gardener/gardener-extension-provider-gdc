@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	extensionscontroller "github.com/gardener/gardener/extensions/pkg/controller"
 	gardenercorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
@@ -683,5 +684,121 @@ func Test_actuator_ReconcileErrors(t *testing.T) {
 				t.Fatalf("expected error: %s\n Got error: %v", tt.expectedError, err)
 			}
 		})
+	}
+}
+
+func Test_actuator_ReconcileZoneFailoverWhenVMStuckStarting(t *testing.T) {
+	providerConfig := &apisgdc.CloudProfileConfig{
+		OrgConfig: createOrgConfigStruct(),
+		MachineImages: []apisgdc.MachineImages{
+			{
+				Name:    "image",
+				Project: "garden-project",
+				Versions: []apisgdc.MachineImageVersion{
+					{
+						Version: "1.0.0",
+						Image:   "garden-image",
+					},
+				},
+			},
+		},
+	}
+	providerConfigBytes, err := json.Marshal(providerConfig)
+	if err != nil {
+		t.Fatalf("error encoding provider config: %v", err)
+	}
+	project := "garden"
+	bastion := &extensionsv1alpha1.Bastion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bastion",
+			Namespace: project,
+		},
+		Status: extensionsv1alpha1.BastionStatus{
+			DefaultStatus: extensionsv1alpha1.DefaultStatus{
+				ProviderStatus: &runtime.RawExtension{
+					Raw: encode(providerStatusRaw{Zone: "zone1"}),
+				},
+			},
+		},
+	}
+	stuckVM := &vmv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              VMName(bastion.Name),
+			Namespace:         project,
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Minute)),
+		},
+		Status: vmv1.VirtualMachineStatus{
+			State: vmv1.VirtualMachineStateStarting,
+		},
+	}
+	vmdisk := &vmv1.VirtualMachineDisk{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      DiskName(bastion.Name),
+			Namespace: project,
+		},
+		Status: vmv1.VirtualMachineDiskStatus{
+			Phase: vmv1.DiskPhaseSucceeded,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	runtimeutil.Must(corev1.AddToScheme(scheme))
+	runtimeutil.Must(extensionsv1alpha1.AddToScheme(scheme))
+	runtimeutil.Must(gdchnetworkingv1.AddToScheme(scheme))
+	runtimeutil.Must(vmv1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bastion, stuckVM, vmdisk).WithStatusSubresource(bastion).Build()
+
+	cluster := &extensionscontroller.Cluster{
+		Shoot: createShootStruct(),
+		CloudProfile: &gardenercorev1beta1.CloudProfile{
+			Spec: gardenercorev1beta1.CloudProfileSpec{
+				ProviderConfig: &runtime.RawExtension{
+					Raw: providerConfigBytes,
+				},
+				MachineTypes: []gardenercorev1beta1.MachineType{
+					{
+						Name:         "machine-type",
+						CPU:          resource.MustParse("4"),
+						Architecture: ptr.To("amd64"),
+					},
+				},
+				MachineImages: []gardenercorev1beta1.MachineImage{
+					{
+						Name: "image",
+						Versions: []gardenercorev1beta1.MachineImageVersion{
+							{
+								Architectures: []string{"amd64"},
+								ExpirableVersion: gardenercorev1beta1.ExpirableVersion{
+									Classification: ptr.To(gardenercorev1beta1.ClassificationSupported),
+									Version:        "1.0.0",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	a := &actuator{
+		client:  c,
+		decoder: serializer.NewCodecFactory(c.Scheme(), serializer.EnableStrict).UniversalDecoder(),
+		getClientAndProject: func(ctx context.Context, _ client.Client, _ *gdcclient.OrgClusterConfig, _ corev1.SecretReference, _ *runtime.Scheme) (client.Client, string, error) {
+			return c, project, nil
+		},
+	}
+
+	err = a.Reconcile(context.Background(), logr.Discard(), bastion, cluster)
+	if err == nil || !strings.Contains(err.Error(), `failing over to zone "zone2"`) {
+		t.Fatalf("expected failover error to zone2, got: %v", err)
+	}
+
+	updatedBastion := &extensionsv1alpha1.Bastion{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(bastion), updatedBastion); err != nil {
+		t.Fatalf("failed to get updated bastion: %v", err)
+	}
+	ps, err := getProviderStatus(updatedBastion)
+	if err != nil || ps == nil || ps.Zone != "zone2" {
+		t.Fatalf("expected providerStatus.zone to be updated to zone2, got: %+v (err=%v)", ps, err)
 	}
 }
