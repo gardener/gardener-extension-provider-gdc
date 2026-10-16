@@ -55,6 +55,49 @@ type bastionTestFixture struct {
 	*commonTestFixture
 
 	bastionNamespace string
+	// availableZones holds all zones passed via --available_zones so BastionController can
+	// exercise multi-zone failover if a baremetal host in the initial zone is unhealthy.
+	availableZones []string
+	// zoneMgmtClients maps each zone name to its corresponding GDC management API client.
+	zoneMgmtClients map[string]client.WithWatch
+}
+
+// zones returns the configured multi-zone list from --available_zones, falling back to --zone.
+func (f *bastionTestFixture) zones() []string {
+	var zones []string
+	for _, z := range f.availableZones {
+		if z != "" {
+			zones = append(zones, z)
+		}
+	}
+	if len(zones) == 0 {
+		zones = []string{*zone}
+	}
+	return zones
+}
+
+// activeBastionZone reads the currently selected zone from bastion.Status.ProviderStatus,
+// allowing assertions to query the zone where BastionController provisioned (or failed over) the VM.
+func (f *bastionTestFixture) activeBastionZone(bastion *extensionsv1alpha1.Bastion) string {
+	if bastion != nil && bastion.Status.ProviderStatus != nil && len(bastion.Status.ProviderStatus.Raw) > 0 {
+		var ps struct {
+			Zone string `json:"zone"`
+		}
+		if err := json.Unmarshal(bastion.Status.ProviderStatus.Raw, &ps); err == nil && ps.Zone != "" {
+			return ps.Zone
+		}
+	}
+	return *zone
+}
+
+// mgmtClientForZone returns the management API client for the given zone, falling back to f.mgmtClient.
+func (f *bastionTestFixture) mgmtClientForZone(z string) client.WithWatch {
+	if f.zoneMgmtClients != nil {
+		if c, ok := f.zoneMgmtClients[z]; ok && c != nil {
+			return c
+		}
+	}
+	return f.mgmtClient
 }
 
 // test runs the Bastion test suite.
@@ -66,6 +109,15 @@ func (f *bastionTestFixture) test(t *testing.T) {
 
 	if f.bastionNamespace == "" {
 		t.Fatalf("bastionNamespace is not set")
+	}
+
+	f.zoneMgmtClients = make(map[string]client.WithWatch)
+	for _, z := range f.zones() {
+		zClient, err := GetManagementClient(f.scheme, z)
+		if err != nil {
+			t.Fatalf("failed to create management client for zone %s: %v", z, err)
+		}
+		f.zoneMgmtClients[z] = zClient
 	}
 
 	// Prerequisite: Ensure cluster and dependencies exist
@@ -153,20 +205,23 @@ func (f *bastionTestFixture) assertBastionResourcesDeleted(ctx context.Context, 
 		&vmv1.VirtualMachineDisk{ObjectMeta: metav1.ObjectMeta{Name: diskName, Namespace: f.project}},
 	}
 
-	for _, obj := range resources {
-		// Use mgmtClient for checking deletion of dependent resources
-		if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, bastionCleanupTimeout, true, func(ctx context.Context) (bool, error) {
-			if err := f.mgmtClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
-				if apierrors.IsNotFound(err) {
-					return true, nil
+	for _, z := range f.zones() {
+		zClient := f.mgmtClientForZone(z)
+		for _, obj := range resources {
+			objCopy := obj.DeepCopyObject().(client.Object)
+			if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, bastionCleanupTimeout, true, func(ctx context.Context) (bool, error) {
+				if err := zClient.Get(ctx, client.ObjectKeyFromObject(objCopy), objCopy); err != nil {
+					if apierrors.IsNotFound(err) {
+						return true, nil
+					}
+					return false, err
 				}
-				return false, err
+				return false, nil
+			}); err != nil {
+				t.Fatalf("failed to wait for %T %s in zone %s to be deleted: %v", objCopy, objCopy.GetName(), z, err)
+			} else {
+				t.Logf("%T %s in zone %s deleted successfully", objCopy, objCopy.GetName(), z)
 			}
-			return false, nil
-		}); err != nil {
-			t.Fatalf("failed to wait for %T %s to be deleted: %v", obj, obj.GetName(), err)
-		} else {
-			t.Logf("%T %s deleted successfully", obj, obj.GetName())
 		}
 	}
 }
@@ -181,8 +236,12 @@ func (f *bastionTestFixture) assertBastionReady(ctx context.Context, t *testing.
 			return false, nil
 		}
 
-		t.Logf("Waiting for %q, LastError: %q",
+		activeZone := f.activeBastionZone(bastion)
+		zClient := f.mgmtClientForZone(activeZone)
+
+		t.Logf("Waiting for %q (zone %s), LastError: %q",
 			bastion.Name,
+			activeZone,
 			ptr.Deref(bastion.Status.LastError, gardencorev1beta1.LastError{}).Description)
 		lastOptState := ptr.Deref(bastion.Status.LastOperation, gardencorev1beta1.LastOperation{}).State
 
@@ -193,43 +252,40 @@ func (f *bastionTestFixture) assertBastionReady(ctx context.Context, t *testing.
 		// Assert: VirtualMachine is Running
 		vmName := bastioncontroller.VMName(bastion.Name)
 		vm := &vmv1.VirtualMachine{}
-		// Use mgmtClient for VirtualMachine
-		if err := f.mgmtClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: vmName}, vm); err != nil {
-			t.Logf("failed to get VirtualMachine %s: %v", vmName, err)
+		if err := zClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: vmName}, vm); err != nil {
+			t.Logf("failed to get VirtualMachine %s in zone %s: %v", vmName, activeZone, err)
 			return false, nil
 		}
 		if vm.Status.State != vmv1.VirtualMachineStateRunning {
-			t.Logf("VirtualMachine %s state is %s, waiting for Running", vmName, vm.Status.State)
+			t.Logf("VirtualMachine %s state in zone %s is %s, waiting for Running", vmName, activeZone, vm.Status.State)
 			return false, nil
 		}
-		t.Logf("VirtualMachine %s is Running", vmName)
+		t.Logf("VirtualMachine %s in zone %s is Running", vmName, activeZone)
 
 		// Assert: VirtualMachineExternalAccess has IngressIP
 		vmea := &vmv1.VirtualMachineExternalAccess{}
-		// Use mgmtClient for VirtualMachineExternalAccess
-		if err := f.mgmtClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: vmName}, vmea); err != nil {
-			t.Logf("failed to get VirtualMachineExternalAccess %s: %v", vmName, err)
+		if err := zClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: vmName}, vmea); err != nil {
+			t.Logf("failed to get VirtualMachineExternalAccess %s in zone %s: %v", vmName, activeZone, err)
 			return false, nil
 		}
 		if vmea.Status.IngressIP == "" {
-			t.Logf("VirtualMachineExternalAccess %s has no IngressIP", vmName)
+			t.Logf("VirtualMachineExternalAccess %s in zone %s has no IngressIP", vmName, activeZone)
 			return false, nil
 		}
-		t.Logf("VirtualMachineExternalAccess %s has IngressIP: %s", vmName, vmea.Status.IngressIP)
+		t.Logf("VirtualMachineExternalAccess %s in zone %s has IngressIP: %s", vmName, activeZone, vmea.Status.IngressIP)
 
 		// Assert: VirtualMachineDisk is Succeeded
 		diskName := bastioncontroller.DiskName(bastion.Name)
 		disk := &vmv1.VirtualMachineDisk{}
-		// Use mgmtClient for VirtualMachineDisk
-		if err := f.mgmtClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: diskName}, disk); err != nil {
-			t.Logf("failed to get VirtualMachineDisk %s: %v", diskName, err)
+		if err := zClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: diskName}, disk); err != nil {
+			t.Logf("failed to get VirtualMachineDisk %s in zone %s: %v", diskName, activeZone, err)
 			return false, nil
 		}
 		if disk.Status.Phase != vmv1.DiskPhaseSucceeded {
-			t.Logf("VirtualMachineDisk %s phase is %s, waiting for Succeeded", diskName, disk.Status.Phase)
+			t.Logf("VirtualMachineDisk %s in zone %s phase is %s, waiting for Succeeded", diskName, activeZone, disk.Status.Phase)
 			return false, nil
 		}
-		t.Logf("VirtualMachineDisk %s is Succeeded", diskName)
+		t.Logf("VirtualMachineDisk %s in zone %s is Succeeded", diskName, activeZone)
 
 		return true, nil
 	}); err != nil {
@@ -383,15 +439,17 @@ func (f *bastionTestFixture) createTestNamespace(ctx context.Context) error {
 
 // createInfrastructureConfig creates the InfrastructureConfig for the test.
 func (f *bastionTestFixture) createInfrastructureConfig() ([]byte, error) {
+	var zones []v1alpha1.Zone
+	for _, z := range f.zones() {
+		zones = append(zones, v1alpha1.Zone{Name: z})
+	}
 	infraConfig := &v1alpha1.InfrastructureConfig{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: v1alpha1.SchemeGroupVersion.String(),
 			Kind:       "InfrastructureConfig",
 		},
 		Networks: v1alpha1.NetworkConfig{
-			Zones: []v1alpha1.Zone{
-				{Name: *zone},
-			},
+			Zones: zones,
 		},
 	}
 	return json.Marshal(infraConfig)
@@ -399,6 +457,13 @@ func (f *bastionTestFixture) createInfrastructureConfig() ([]byte, error) {
 
 // createCloudProfileConfig creates the CloudProfileConfig for the test.
 func (f *bastionTestFixture) createCloudProfileConfig() ([]byte, error) {
+	var zoneEndpoints []*v1alpha1.ZoneEndpoints
+	for _, z := range f.zones() {
+		zoneEndpoints = append(zoneEndpoints, &v1alpha1.ZoneEndpoints{
+			Name:          z,
+			ManagementAPI: "https://management-kube.apiserver." + *org + "." + z + "." + *labURL,
+		})
+	}
 	cloudProfileConfig := &v1alpha1.CloudProfileConfig{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: v1alpha1.SchemeGroupVersion.String(),
@@ -417,12 +482,7 @@ func (f *bastionTestFixture) createCloudProfileConfig() ([]byte, error) {
 			},
 		},
 		OrgConfig: &v1alpha1.OrgConfig{
-			Zones: []*v1alpha1.ZoneEndpoints{
-				{
-					Name:          *zone,
-					ManagementAPI: "https://management-kube.apiserver." + *org + "." + *zone + "." + *labURL,
-				},
-			},
+			Zones: zoneEndpoints,
 		},
 	}
 	return json.Marshal(cloudProfileConfig)

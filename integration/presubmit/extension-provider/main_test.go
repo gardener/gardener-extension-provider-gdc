@@ -176,6 +176,7 @@ func TestExtensionProvider(t *testing.T) {
 	bastionFixture := &bastionTestFixture{
 		commonTestFixture: cloneCommon(),
 		bastionNamespace:  common.namespace + "-bastion",
+		availableZones:    strings.Split(*availableZones, ","),
 	}
 	controlPlaneFixture := controlPlaneTestFixture{
 		commonTestFixture:     cloneCommon(),
