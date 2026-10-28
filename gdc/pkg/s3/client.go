@@ -15,12 +15,14 @@
 package s3
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -84,8 +86,8 @@ type DeleteObjectOutput struct {
 }
 
 type Client interface {
-	ListObjectsV2Pages(bucketFQN string) ([]string, error)
-	DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error
+	DeleteObject(ctx context.Context, input DeleteObjectInput) (*DeleteObjectOutput, error)
 	UploadObject(input UploadObjectInput) (*UploadObjectOutput, error)
 	GetObject(input GetObjectInput, opts ...GetObjectOption) (*GetObjectOutput, error)
 }
@@ -147,26 +149,57 @@ type s3Client struct {
 	Config   Config
 }
 
-func (s3Client *s3Client) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
-	var objectKeys []string
-	input := &s3.ListObjectsV2Input{Bucket: &bucketFQN}
-	err := s3Client.s3API.ListObjectsV2Pages(
-		input,
-		func(page *s3.ListObjectsV2Output, lastPage bool) bool {
-			for _, o := range page.Contents {
-				objectKeys = append(objectKeys, *o.Key)
-			}
-			// Continue iterating until there are no more pages.
-			return true
-		})
-	if err != nil {
-		return nil, err
+// DeleteObjectsWithPrefix deletes current objects one page at a time. Version IDs
+// are deliberately omitted: versioned buckets create delete markers and retain
+// noncurrent versions for Object Lock and lifecycle expiration.
+func (s3Client *s3Client) DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
+	if prefix == "" {
+		return fmt.Errorf("object deletion requires a non-empty prefix")
 	}
-
-	return objectKeys, nil
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	input := &s3.ListObjectsV2Input{Bucket: &bucketFQN, Prefix: &prefix, MaxKeys: aws.Int64(1000)}
+	var deleteErr error
+	err := s3Client.s3API.ListObjectsV2PagesWithContext(ctx, input, func(page *s3.ListObjectsV2Output, _ bool) bool {
+		if deleteErr = ctx.Err(); deleteErr != nil {
+			return false
+		}
+		objects := make([]*s3.ObjectIdentifier, 0, len(page.Contents))
+		for _, object := range page.Contents {
+			// Guard against an incompatible endpoint returning keys outside the prefix.
+			if object.Key == nil || !strings.HasPrefix(*object.Key, prefix) {
+				deleteErr = fmt.Errorf("listing returned object outside prefix %q", prefix)
+				return false
+			}
+			objects = append(objects, &s3.ObjectIdentifier{Key: object.Key})
+		}
+		if len(objects) == 0 {
+			return true
+		}
+		output, err := s3Client.s3API.DeleteObjectsWithContext(ctx, &s3.DeleteObjectsInput{
+			Bucket: &bucketFQN,
+			Delete: &s3.Delete{Objects: objects, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			deleteErr = err
+			return false
+		}
+		if output != nil && len(output.Errors) > 0 {
+			objectError := output.Errors[0]
+			deleteErr = fmt.Errorf("failed to delete object %q: %s: %s",
+				aws.StringValue(objectError.Key), aws.StringValue(objectError.Code), aws.StringValue(objectError.Message))
+			return false
+		}
+		return true
+	})
+	if deleteErr != nil {
+		return handleAWSError(deleteErr, bucketFQN)
+	}
+	return handleAWSError(err, bucketFQN)
 }
 
-func (s3Client *s3Client) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error) {
+func (s3Client *s3Client) DeleteObject(ctx context.Context, input DeleteObjectInput) (*DeleteObjectOutput, error) {
 	s3Input := &s3.DeleteObjectInput{
 		Bucket: &input.BucketFqn,
 		Key:    &input.ObjectKey,
@@ -175,7 +208,7 @@ func (s3Client *s3Client) DeleteObject(input DeleteObjectInput) (*DeleteObjectOu
 	if input.VersionId != nil {
 		s3Input.VersionId = input.VersionId
 	}
-	s3output, err := s3Client.s3API.DeleteObject(s3Input)
+	s3output, err := s3Client.s3API.DeleteObjectWithContext(ctx, s3Input)
 	if err != nil {
 		return nil, err
 	}

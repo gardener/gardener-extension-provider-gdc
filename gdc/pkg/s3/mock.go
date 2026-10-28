@@ -15,7 +15,9 @@
 package s3
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -45,19 +47,31 @@ type mockClient struct {
 	DeleteObjectFunc func(input DeleteObjectInput) (*DeleteObjectOutput, error)
 }
 
-func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
+func (m *mockClient) DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
+	if prefix == "" {
+		return fmt.Errorf("object deletion requires a non-empty prefix")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	bucket, ok := m.buckets[bucketFQN]
 	if !ok {
-		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
+		return fmt.Errorf("no such bucket %q", bucketFQN)
 	}
-	var objects []string
 	for k := range bucket.Objects {
-		objects = append(objects, k)
+		if strings.HasPrefix(k, prefix) {
+			if _, err := m.DeleteObject(ctx, DeleteObjectInput{BucketFqn: bucketFQN, ObjectKey: k}); err != nil {
+				return err
+			}
+		}
 	}
-	return objects, nil
+	return nil
 }
 
-func (m *mockClient) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error) {
+func (m *mockClient) DeleteObject(ctx context.Context, input DeleteObjectInput) (*DeleteObjectOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Call the custom function if provided
 	if m.DeleteObjectFunc != nil {
 		return m.DeleteObjectFunc(input)
