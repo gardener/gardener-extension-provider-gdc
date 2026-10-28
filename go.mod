@@ -48,7 +48,7 @@ require (
 	github.com/gardener/etcd-druid/api v0.39.0
 	github.com/gardener/gardener v1.154.0
 	github.com/gardener/gardener/pkg/apis v1.154.0
-	github.com/gardener/machine-controller-manager v0.63.0
+	github.com/gardener/machine-controller-manager v0.63.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/googlecloudplatform/google-distributed-cloud-apis v0.0.0-20260824201624-0c18fa0ddc04
 	helm.sh/helm/v4 v4.3.1
