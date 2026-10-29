@@ -141,6 +141,9 @@ func TestGenericDeletionRetriesAfterSeedAPIFailure(t *testing.T) {
 			if !controllerutil.ContainsFinalizer(current, gardenerbackupentry.FinalizerName) {
 				t.Fatal("entry finalizer removed despite API failure")
 			}
+			// Gardener's generic actuator deletes the etcd backup Secret before the
+			// success status patch. Revisit this assertion if that ordering changes
+			// when upgrading gardener/gardener.
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(etcd), &corev1.Secret{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("etcd Secret should already be deleted, got %v", err)
 			}

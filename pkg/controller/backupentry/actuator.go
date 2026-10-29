@@ -109,6 +109,7 @@ func (a *actuator) GetETCDSecretData(_ context.Context, _ logr.Logger, _ *extens
 }
 
 func (a *actuator) Delete(ctx context.Context, log logr.Logger, backupEntry *extensionsv1alpha1.BackupEntry) error {
+	// Avoid credential reads and client setup if reconciliation is already canceled.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -157,6 +158,8 @@ func (a *actuator) deleteObjectsWithPrefix(ctx context.Context, log logr.Logger,
 		return fmt.Errorf("failed to create s3Client, %w", err)
 	}
 	bucketFQN := bucketStorageClient.bucket.FullyQualifiedName
+	// Delete current objects without version IDs. Retained versions remain
+	// subject to Object Lock; lifecycle manages version and delete marker cleanup.
 	if err := bucketStorageClient.s3Client.DeleteObjectsWithPrefix(ctx, bucketFQN, prefix); err != nil {
 		if stderrors.Is(err, s3.ErrorS3NoSuchBucket) {
 			log.Info("S3 bucket no longer exists, skipping object deletion", "bucket", bucketFQN)
@@ -164,7 +167,7 @@ func (a *actuator) deleteObjectsWithPrefix(ctx context.Context, log logr.Logger,
 		}
 		return fmt.Errorf("failed to delete S3 objects with prefix %q in bucket %s: %w", prefix, bucketName, err)
 	}
-	log.Info("S3 objects deleted; BackupEntry status and finalizer cleanup pending", "bucket", bucketFQN, "prefix", prefix, "versionCleanup", "retained versions and delete markers are managed by bucket lifecycle")
+	log.Info("S3 objects deleted; BackupEntry status and finalizer cleanup pending", "bucket", bucketFQN, "prefix", prefix)
 	return nil
 }
 

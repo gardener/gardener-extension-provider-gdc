@@ -152,6 +152,8 @@ type s3Client struct {
 // DeleteObjectsWithPrefix deletes current objects one page at a time. Version IDs
 // are deliberately omitted: versioned buckets create delete markers and retain
 // noncurrent versions for Object Lock and lifecycle expiration.
+// A canceled batch may still complete server-side. With eventually consistent
+// listings, a retry can create duplicate delete markers without removing versions.
 func (s3Client *s3Client) DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
 	if prefix == "" {
 		return fmt.Errorf("object deletion requires a non-empty prefix")
@@ -187,8 +189,8 @@ func (s3Client *s3Client) DeleteObjectsWithPrefix(ctx context.Context, bucketFQN
 		}
 		if output != nil && len(output.Errors) > 0 {
 			objectError := output.Errors[0]
-			deleteErr = fmt.Errorf("failed to delete object %q: %s: %s",
-				aws.StringValue(objectError.Key), aws.StringValue(objectError.Code), aws.StringValue(objectError.Message))
+			deleteErr = fmt.Errorf("%d objects failed to delete; first: %q: %s: %s",
+				len(output.Errors), aws.StringValue(objectError.Key), aws.StringValue(objectError.Code), aws.StringValue(objectError.Message))
 			return false
 		}
 		return true

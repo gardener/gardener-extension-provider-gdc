@@ -32,13 +32,13 @@ func testS3Client(t *testing.T, server *httptest.Server) Client {
 // Run through the real AWS SDK's pagination and XML protocol. The server models
 // current objects becoming hidden by delete markers, while versions remain.
 func TestDeleteObjectsWithPrefixPaginationAndRetry(t *testing.T) {
-	for _, partialFailure := range []bool{false, true} {
-		t.Run(fmt.Sprintf("partialFailure=%v", partialFailure), func(t *testing.T) {
+	for _, failedObjects := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("failedObjects=%d", failedObjects), func(t *testing.T) {
 			var mu sync.Mutex
 			current := map[string]bool{"shoot/a": true, "shoot/b": true, "shoot/c": true, "shoot/d": true, "other/a": true, "shoot-other/a": true}
 			markers := map[string]int{}
 			listCalls, deleteCalls := 0, 0
-			failOnce := partialFailure
+			failOnce := failedObjects > 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
@@ -97,14 +97,14 @@ func TestDeleteObjectsWithPrefixPaginationAndRetry(t *testing.T) {
 						if object.VersionID != nil || !strings.HasPrefix(object.Key, "shoot/") {
 							t.Errorf("unexpected permanent or out-of-prefix deletion: %+v", object)
 						}
-						if failOnce && object.Key == "shoot/b" {
-							failOnce = false
-							fmt.Fprint(w, "<Error><Key>shoot/b</Key><Code>AccessDenied</Code><Message>injected failure</Message></Error>")
+						if failOnce && (object.Key == "shoot/b" || (failedObjects == 2 && object.Key == "shoot/a")) {
+							fmt.Fprintf(w, "<Error><Key>%s</Key><Code>AccessDenied</Code><Message>injected failure</Message></Error>", object.Key)
 							continue
 						}
 						current[object.Key] = false
 						markers[object.Key]++
 					}
+					failOnce = false
 					fmt.Fprint(w, "</DeleteResult>")
 				default:
 					t.Errorf("unexpected S3 request: %s", r.Method)
@@ -114,8 +114,13 @@ func TestDeleteObjectsWithPrefixPaginationAndRetry(t *testing.T) {
 			defer server.Close()
 			c := testS3Client(t, server)
 			err := c.DeleteObjectsWithPrefix(context.Background(), "bucket", "shoot/")
-			if partialFailure {
-				if err == nil || !strings.Contains(err.Error(), "AccessDenied") {
+			if failedObjects > 0 {
+				firstFailedKey := "shoot/b"
+				if failedObjects == 2 {
+					firstFailedKey = "shoot/a"
+				}
+				expectedError := fmt.Sprintf("%d objects failed to delete; first: %q: AccessDenied: injected failure", failedObjects, firstFailedKey)
+				if err == nil || err.Error() != expectedError {
 					t.Fatalf("expected per-object error, got %v", err)
 				}
 				mu.Lock()
@@ -130,7 +135,8 @@ func TestDeleteObjectsWithPrefixPaginationAndRetry(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			// An empty-prefix retry must not add more delete markers.
+			// Once the listing reflects the deletions, an empty-prefix retry must
+			// not add more delete markers. This server models consistent listings.
 			if err := c.DeleteObjectsWithPrefix(context.Background(), "bucket", "shoot/"); err != nil {
 				t.Fatal(err)
 			}
