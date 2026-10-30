@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	stderrors "errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -31,7 +32,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	klog "k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -108,15 +108,19 @@ func (a *actuator) GetETCDSecretData(_ context.Context, _ logr.Logger, _ *extens
 	return backupSecretData, nil
 }
 
-func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupEntry *extensionsv1alpha1.BackupEntry) error {
+func (a *actuator) Delete(ctx context.Context, log logr.Logger, backupEntry *extensionsv1alpha1.BackupEntry) error {
+	// Avoid credential reads and client setup if reconciliation is already canceled.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	bucketClient, err := a.getClientAndConfig(ctx, backupEntry)
 	if err != nil {
-		return errors.DetermineError(fmt.Errorf("failed to get client and config while reconciling backup bucket %s: %w", backupEntry.Name, err))
+		return errors.DetermineError(fmt.Errorf("failed to get client and config while deleting backup entry %s: %w", backupEntry.Name, err))
 	}
 	entryName := strings.TrimPrefix(backupEntry.Name, v1beta1constants.BackupSourcePrefix+"-")
 
 	// TODO(b/334957997): find out the GDCH specific error code and validate the error conversion
-	return errors.DetermineError(a.deleteObjectsWithPrefix(ctx, backupEntry.Spec.BucketName, backupEntry.Spec.ProviderConfig, fmt.Sprintf("%s/", entryName), bucketClient))
+	return errors.DetermineError(a.deleteObjectsWithPrefix(ctx, log, backupEntry.Spec.BucketName, backupEntry.Spec.ProviderConfig, fmt.Sprintf("%s/", entryName), bucketClient))
 }
 
 // getClientAndConfig is a helper function to initialize all necessary clients and configurations
@@ -144,30 +148,26 @@ func (a *actuator) getClientAndConfig(ctx context.Context, backupEntry *extensio
 }
 
 // deleteObjectsWithPrefix deletes all objects within the specified bucket that have a key starting with the given prefix.
-func (a *actuator) deleteObjectsWithPrefix(ctx context.Context, bucketName string, providerConfig *runtime.RawExtension, prefix string, bucketClient *backupEntryClientConfig) error {
+func (a *actuator) deleteObjectsWithPrefix(ctx context.Context, log logr.Logger, bucketName string, providerConfig *runtime.RawExtension, prefix string, bucketClient *backupEntryClientConfig) error {
 	bucketStorageClient, err := a.createS3Client(ctx, bucketName, providerConfig, bucketClient)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			klog.Infof("Bucket %s not found, skipping object deletion", bucketName)
+			log.Info("Bucket not found, skipping S3 object deletion", "bucket", bucketName)
 			return nil
 		}
 		return fmt.Errorf("failed to create s3Client, %w", err)
 	}
 	bucketFQN := bucketStorageClient.bucket.FullyQualifiedName
-	objects, err := bucketStorageClient.s3Client.ListObjectsV2Pages(bucketFQN)
-	if err != nil {
-		return fmt.Errorf("failed to list objects in bucket %s, %w", bucketName, err)
-	}
-	for _, object := range objects {
-		if strings.HasPrefix(object, prefix) {
-			_, err := bucketStorageClient.s3Client.DeleteObject(s3.DeleteObjectInput{BucketFqn: bucketFQN, ObjectKey: object})
-			if err != nil {
-				klog.Errorf("failed to delete object %s from bucket %s, %v", object, bucketFQN, err)
-				return fmt.Errorf("failed to delete object %s, %w", object, err)
-			}
-			klog.Infof("Deleted object %s from bucket %s", object, bucketFQN)
+	// Delete current objects without version IDs. Retained versions remain
+	// subject to Object Lock; lifecycle manages version and delete marker cleanup.
+	if err := bucketStorageClient.s3Client.DeleteObjectsWithPrefix(ctx, bucketFQN, prefix); err != nil {
+		if stderrors.Is(err, s3.ErrorS3NoSuchBucket) {
+			log.Info("S3 bucket no longer exists, skipping object deletion", "bucket", bucketFQN)
+			return nil
 		}
+		return fmt.Errorf("failed to delete S3 objects with prefix %q in bucket %s: %w", prefix, bucketName, err)
 	}
+	log.Info("S3 objects deleted; BackupEntry status and finalizer cleanup pending", "bucket", bucketFQN, "prefix", prefix)
 	return nil
 }
 
