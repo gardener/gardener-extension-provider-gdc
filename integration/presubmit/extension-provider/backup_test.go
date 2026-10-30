@@ -15,12 +15,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	awss3 "github.com/aws/aws-sdk-go/service/s3"
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	globalv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/global/object/v1"
@@ -34,9 +46,12 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/auth"
 	gdcclient "github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/client"
+	gdcs3 "github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/s3"
 	"github.com/gardener/gardener-extension-provider-gdc/integration/pkg/kubernetes"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc/v1alpha1"
+	"github.com/gardener/gardener-extension-provider-gdc/pkg/gdc/storage"
 )
 
 const (
@@ -93,7 +108,7 @@ func (f *backupTestFixture) test(t *testing.T) {
 		f.testBackupEntryWithPreExistingBucket(t, ctx, corev1.SecretReference{
 			Name:      zonalSecret.Name,
 			Namespace: zonalSecret.Namespace,
-		})
+		}, sa, zonalGDCHConfig)
 	})
 
 	t.Run("DualzoneBackupBucketCreation", func(t *testing.T) {
@@ -297,24 +312,7 @@ func (f *backupTestFixture) testBackupEntryCreation(t *testing.T, ctx context.Co
 		t.Fatalf("failed to create backupentry %q, %v", entry.Name, err)
 	}
 	t.Cleanup(func() {
-		t.Logf("cleaning up BackupEntry %q", entry.Name)
-		if err := f.vucClient.Delete(ctx, entry); err != nil {
-			if apierrors.IsNotFound(err) {
-				return
-			}
-			t.Fatalf("cannot delete BackupEntry object %v", err)
-		}
-		if err := wait.PollUntilContextTimeout(ctx, pollingInterval, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
-			if err := f.vucClient.Get(ctx, client.ObjectKeyFromObject(entry), entry); err != nil {
-				if apierrors.IsNotFound(err) {
-					return true, nil
-				}
-				return false, err
-			}
-			return false, nil
-		}); err != nil {
-			t.Fatalf("error waiting for BackupEntry object to be deleted: %v", err)
-		}
+		f.deleteBackupEntryAndWait(t, ctx, entry.Name)
 	})
 
 	backupEntryList := &extensionsv1alpha1.BackupEntryList{}
@@ -335,7 +333,34 @@ func (f *backupTestFixture) testBackupEntryCreation(t *testing.T, ctx context.Co
 	}
 }
 
-func (f *backupTestFixture) testBackupEntryWithPreExistingBucket(t *testing.T, ctx context.Context, secretRef corev1.SecretReference) {
+func (f *backupTestFixture) deleteBackupEntryAndWait(t *testing.T, ctx context.Context, entryName string) {
+	t.Helper()
+	entry := &extensionsv1alpha1.BackupEntry{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: entryName,
+		},
+	}
+	if err := f.vucClient.Delete(ctx, entry); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		t.Fatalf("cannot delete BackupEntry object %v", err)
+	}
+	t.Logf("cleaning up BackupEntry %q", entry.Name)
+	if err := wait.PollUntilContextTimeout(ctx, pollingInterval, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		if err := f.vucClient.Get(ctx, client.ObjectKeyFromObject(entry), entry); err != nil {
+			if apierrors.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}
+		return false, nil
+	}); err != nil {
+		t.Fatalf("error waiting for BackupEntry object %q to be deleted: %v", entry.Name, err)
+	}
+}
+
+func (f *backupTestFixture) testBackupEntryWithPreExistingBucket(t *testing.T, ctx context.Context, secretRef corev1.SecretReference, sa []byte, gdchConfig *gdcclient.OrgClusterConfig) {
 	// Action: Create Bucket
 	bucketName := "pre-existing-bucket-" + *commitHash
 	bucket := &objectv1.Bucket{
@@ -380,8 +405,235 @@ func (f *backupTestFixture) testBackupEntryWithPreExistingBucket(t *testing.T, c
 		t.Fatalf("Bucket is not Ready in %d minutes %v", int(zonalBucketTimeout.Minutes()), err)
 	}
 
-	// Action: Create BackupEntry pointing to existing bucket
-	f.testBackupEntryCreation(t, ctx, "backupentry-pre-existing-"+*commitHash, bucketName, secretRef)
+	readyBucket, err := storage.GetAndValidateZonalBucket(ctx, f.mgmtClient, client.ObjectKeyFromObject(bucket))
+	if err != nil {
+		t.Fatalf("failed to get ready zonal bucket %q: %v", bucketName, err)
+	}
+	s3Client, rawS3 := f.newZonalBucketS3Clients(t, ctx, readyBucket, sa, gdchConfig)
+	bucketFQN := readyBucket.Status.FullyQualifiedName
+
+	// Registered after bucket creation so LIFO cleanup purges all retained versions
+	// and delete markers before deleting the GDC Bucket CR.
+	t.Cleanup(func() {
+		purgeBucketVersionsAndMarkers(t, ctx, rawS3, bucketFQN)
+	})
+
+	// Action: Create two BackupEntries pointing to the same existing bucket to verify
+	// prefix-scoped deletion and sibling prefix isolation on a populated bucket.
+	entryName := "backupentry-pre-existing-" + *commitHash
+	siblingEntryName := "backupentry-pre-existing-sibling-" + *commitHash
+	f.testBackupEntryCreation(t, ctx, entryName, bucketName, secretRef)
+	f.testBackupEntryCreation(t, ctx, siblingEntryName, bucketName, secretRef)
+
+	entryKeys := []string{
+		entryName + "/etcd-main/v2/Full-00000000-00000001.gz",
+		entryName + "/etcd-main/v2/Incr-00000001-00000002.gz",
+	}
+	siblingKey := siblingEntryName + "/etcd-main/v2/Full-00000000-00000001.gz"
+
+	for _, key := range slices.Concat(entryKeys, []string{siblingKey}) {
+		if _, err := s3Client.UploadObject(gdcs3.UploadObjectInput{
+			BucketFqn: bucketFQN,
+			Key:       key,
+			Reader:    bytes.NewReader([]byte("test-backup-payload-" + key)),
+		}); err != nil {
+			t.Fatalf("failed to upload S3 object %q to bucket %q: %v", key, bucketFQN, err)
+		}
+		f.assertS3ObjectExists(t, s3Client, bucketFQN, key)
+	}
+
+	// Delete the primary BackupEntry and verify its objects are soft-deleted while the sibling prefix remains intact.
+	f.deleteBackupEntryAndWait(t, ctx, entryName)
+
+	for _, key := range entryKeys {
+		f.assertS3ObjectDeleted(t, s3Client, bucketFQN, key)
+	}
+	f.assertS3ObjectExists(t, s3Client, bucketFQN, siblingKey)
+	assertVersionedSoftDelete(t, ctx, rawS3, bucketFQN, entryName+"/", len(entryKeys), siblingEntryName+"/", 1)
+
+	// Delete the sibling BackupEntry and verify its object is also soft-deleted.
+	f.deleteBackupEntryAndWait(t, ctx, siblingEntryName)
+	f.assertS3ObjectDeleted(t, s3Client, bucketFQN, siblingKey)
+	assertVersionedSoftDelete(t, ctx, rawS3, bucketFQN, siblingEntryName+"/", 1, "", 0)
+}
+
+func (f *backupTestFixture) newZonalBucketS3Clients(t *testing.T, ctx context.Context, readyBucket *objectv1.Bucket, sa []byte, gdchConfig *gdcclient.OrgClusterConfig) (gdcs3.Client, *awss3.S3) {
+	t.Helper()
+	serviceAccount := &auth.ServiceAccount{}
+	if err := json.Unmarshal(sa, serviceAccount); err != nil {
+		t.Fatalf("failed to parse service account JSON: %v", err)
+	}
+	accessKeys, err := storage.GetAccessKeyAndKeyID(ctx, f.mgmtClient, serviceAccount, gdchConfig.OrgClusterURL)
+	if err != nil {
+		t.Fatalf("failed to get bucket access keys: %v", err)
+	}
+	caDataBytes, err := base64.StdEncoding.DecodeString(gdchConfig.CAData)
+	if err != nil {
+		t.Fatalf("failed to decode CA data from GDC config: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caDataBytes) {
+		t.Fatal("failed to parse CA PEM data from GDC config")
+	}
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    caCertPool,
+				MinVersion: tls.VersionTLS12,
+			},
+		},
+		Timeout: 60 * time.Second,
+	}
+
+	s3Client, err := gdcs3.NewGDCHS3Client(&gdcs3.Config{
+		AccessKeyId:      string(accessKeys.AccessKeyID),
+		SecretAccessKey:  string(accessKeys.AccessKey),
+		S3Certificate:    caDataBytes,
+		EndpointUrl:      readyBucket.Status.Endpoint,
+		Region:           readyBucket.Status.Region,
+		CustomHttpClient: httpClient,
+	})
+	if err != nil {
+		t.Fatalf("failed to create GDC S3 client: %v", err)
+	}
+
+	sess, err := session.NewSession(&aws.Config{
+		Region:               aws.String(readyBucket.Status.Region),
+		Endpoint:             aws.String(readyBucket.Status.Endpoint),
+		HTTPClient:           httpClient,
+		Credentials:          credentials.NewStaticCredentials(string(accessKeys.AccessKeyID), string(accessKeys.AccessKey), ""),
+		S3ForcePathStyle:     aws.Bool(true),
+		S3Disable100Continue: aws.Bool(true),
+	})
+	if err != nil {
+		t.Fatalf("failed to create AWS S3 session: %v", err)
+	}
+
+	return s3Client, awss3.New(sess)
+}
+
+func (f *backupTestFixture) assertS3ObjectExists(t *testing.T, s3Client gdcs3.Client, bucketFQN, key string) {
+	t.Helper()
+	out, err := s3Client.GetObject(gdcs3.GetObjectInput{
+		BucketFqn: bucketFQN,
+		ObjectKey: key,
+	})
+	if err != nil {
+		t.Fatalf("expected S3 object %q in bucket %q to exist, got error: %v", key, bucketFQN, err)
+	}
+	if out != nil && out.Body != nil {
+		_ = out.Body.Close()
+	}
+}
+
+func (f *backupTestFixture) assertS3ObjectDeleted(t *testing.T, s3Client gdcs3.Client, bucketFQN, key string) {
+	t.Helper()
+	out, err := s3Client.GetObject(gdcs3.GetObjectInput{
+		BucketFqn: bucketFQN,
+		ObjectKey: key,
+	})
+	if out != nil && out.Body != nil {
+		_ = out.Body.Close()
+	}
+	if !errors.Is(err, gdcs3.ErrorS3NoSuchKey) {
+		t.Fatalf("expected ErrorS3NoSuchKey for deleted S3 object %q in bucket %q, got: %v", key, bucketFQN, err)
+	}
+}
+
+func assertVersionedSoftDelete(t *testing.T, ctx context.Context, rawS3 *awss3.S3, bucketFQN, deletedPrefix string, wantDeletedCount int, siblingPrefix string, wantSiblingCount int) {
+	t.Helper()
+	verOut, err := rawS3.GetBucketVersioningWithContext(ctx, &awss3.GetBucketVersioningInput{
+		Bucket: aws.String(bucketFQN),
+	})
+	if err != nil {
+		t.Fatalf("failed to get bucket versioning for %q: %v", bucketFQN, err)
+	}
+	versioned := aws.StringValue(verOut.Status) == awss3.BucketVersioningStatusEnabled
+
+	deletedPrefixVersions, deletedPrefixMarkers := 0, 0
+	siblingPrefixCurrentVersions, siblingPrefixMarkers := 0, 0
+	if err := rawS3.ListObjectVersionsPagesWithContext(ctx, &awss3.ListObjectVersionsInput{
+		Bucket: aws.String(bucketFQN),
+	}, func(page *awss3.ListObjectVersionsOutput, _ bool) bool {
+		for _, v := range page.Versions {
+			key := aws.StringValue(v.Key)
+			switch {
+			case strings.HasPrefix(key, deletedPrefix):
+				deletedPrefixVersions++
+				if aws.BoolValue(v.IsLatest) {
+					t.Errorf("expected version %q of deleted key %q to be noncurrent (IsLatest=false)", aws.StringValue(v.VersionId), key)
+				}
+			case siblingPrefix != "" && strings.HasPrefix(key, siblingPrefix):
+				if aws.BoolValue(v.IsLatest) {
+					siblingPrefixCurrentVersions++
+				}
+			}
+		}
+		for _, m := range page.DeleteMarkers {
+			key := aws.StringValue(m.Key)
+			switch {
+			case strings.HasPrefix(key, deletedPrefix):
+				if aws.BoolValue(m.IsLatest) {
+					deletedPrefixMarkers++
+				}
+			case siblingPrefix != "" && strings.HasPrefix(key, siblingPrefix):
+				siblingPrefixMarkers++
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("failed to list object versions in bucket %q: %v", bucketFQN, err)
+	}
+
+	wantVersions, wantMarkers := 0, 0
+	if versioned {
+		wantVersions, wantMarkers = wantDeletedCount, wantDeletedCount
+	}
+	if deletedPrefixVersions != wantVersions || deletedPrefixMarkers != wantMarkers {
+		t.Fatalf("prefix %q (versioned=%v): got versions=%d deleteMarkers=%d, want %d and %d",
+			deletedPrefix, versioned, deletedPrefixVersions, deletedPrefixMarkers, wantVersions, wantMarkers)
+	}
+	if siblingPrefixCurrentVersions != wantSiblingCount || siblingPrefixMarkers != 0 {
+		t.Fatalf("sibling prefix %q: got currentVersions=%d deleteMarkers=%d, want %d and 0",
+			siblingPrefix, siblingPrefixCurrentVersions, siblingPrefixMarkers, wantSiblingCount)
+	}
+}
+
+func purgeBucketVersionsAndMarkers(t *testing.T, ctx context.Context, rawS3 *awss3.S3, bucketFQN string) {
+	t.Helper()
+	err := rawS3.ListObjectVersionsPagesWithContext(ctx, &awss3.ListObjectVersionsInput{
+		Bucket: aws.String(bucketFQN),
+	}, func(page *awss3.ListObjectVersionsOutput, _ bool) bool {
+		var ids []*awss3.ObjectIdentifier
+		for _, v := range page.Versions {
+			ids = append(ids, &awss3.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+		}
+		for _, m := range page.DeleteMarkers {
+			ids = append(ids, &awss3.ObjectIdentifier{Key: m.Key, VersionId: m.VersionId})
+		}
+		if len(ids) == 0 {
+			return true
+		}
+		output, err := rawS3.DeleteObjectsWithContext(ctx, &awss3.DeleteObjectsInput{
+			Bucket: aws.String(bucketFQN),
+			Delete: &awss3.Delete{Objects: ids, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			t.Logf("warning: failed to purge object versions/markers in bucket %q: %v", bucketFQN, err)
+			return false
+		}
+		if output != nil && len(output.Errors) > 0 {
+			firstErr := output.Errors[0]
+			t.Logf("warning: %d object versions/markers failed to purge in bucket %q; first: %q (version %q): %s: %s",
+				len(output.Errors), bucketFQN, aws.StringValue(firstErr.Key), aws.StringValue(firstErr.VersionId), aws.StringValue(firstErr.Code), aws.StringValue(firstErr.Message))
+			return false
+		}
+		return true
+	})
+	if err != nil {
+		t.Logf("warning: failed to list object versions in bucket %q during cleanup: %v", bucketFQN, err)
+	}
 }
 
 func (f *backupTestFixture) createBackupSecret(ctx context.Context, t *testing.T, sa []byte, namePrefix string, config interface{}) (*corev1.Secret, error) {
