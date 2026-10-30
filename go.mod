@@ -45,9 +45,9 @@ require (
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/distribution/reference v0.6.0
-	github.com/gardener/etcd-druid/api v0.39.0
-	github.com/gardener/gardener v1.154.0
-	github.com/gardener/gardener/pkg/apis v1.154.0
+	github.com/gardener/etcd-druid/api v0.39.1
+	github.com/gardener/gardener v1.154.1
+	github.com/gardener/gardener/pkg/apis v1.154.1
 	github.com/gardener/machine-controller-manager v0.63.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/googlecloudplatform/google-distributed-cloud-apis v0.0.0-20260824201624-0c18fa0ddc04
@@ -122,7 +122,7 @@ require (
 	github.com/fluxcd/cli-utils v1.2.2 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/gardener/cert-management v0.22.0 // indirect
-	github.com/gardener/dependency-watchdog v1.8.0 // indirect
+	github.com/gardener/dependency-watchdog v1.8.1 // indirect
 	github.com/gardener/pvc-autoscaler v0.3.1 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-gorp/gorp/v3 v3.1.0 // indirect
