@@ -295,3 +295,38 @@ func validateOrgClusterURL(gdchConfig *gdcclient.OrgClusterConfig, bucketName st
 	}
 	return nil
 }
+
+// HasNativeExpiredObjectDeleteMarker returns true when the bucket's LifecyclePolicy is enabled
+// and contains at least one bucket-wide Enabled rule with ExpiredObjectDeleteMarker set to true.
+func HasNativeExpiredObjectDeleteMarker(lifecyclePolicy *objectv1.LifecyclePolicy) bool {
+	if lifecyclePolicy == nil || !lifecyclePolicy.Enable {
+		return false
+	}
+	for _, rule := range lifecyclePolicy.LifecycleRules {
+		if rule == nil {
+			continue
+		}
+		if rule.Status == nil || *rule.Status != objectv1.Enabled {
+			continue
+		}
+		if rule.Filter != nil && ((rule.Filter.PrefixFilter != nil && *rule.Filter.PrefixFilter != "") || len(rule.Filter.TagFilters) > 0) {
+			continue
+		}
+		if rule.ExpiredObjectDeleteMarker != nil && *rule.ExpiredObjectDeleteMarker {
+			return true
+		}
+	}
+	return false
+}
+
+// NeedsExpiredDeleteMarkerSweep returns true when object locking or lifecycle cleanup is enabled on
+// a versioned BackupBucket, but the target GDC cluster's Bucket resource does not have native
+// ExpiredObjectDeleteMarker enabled (e.g., on GDC 1.16.2 prior to HF#5).
+func NeedsExpiredDeleteMarkerSweep(lockingPolicy *objectv1.LockingPolicy, lifecyclePolicy *objectv1.LifecyclePolicy) bool {
+	hasLocking := lockingPolicy != nil && lockingPolicy.DefaultObjectRetentionDays != nil && *lockingPolicy.DefaultObjectRetentionDays > 0
+	hasLifecycle := lifecyclePolicy != nil && lifecyclePolicy.Enable
+	if !hasLocking && !hasLifecycle {
+		return false
+	}
+	return !HasNativeExpiredObjectDeleteMarker(lifecyclePolicy)
+}

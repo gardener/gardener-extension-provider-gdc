@@ -15,6 +15,7 @@
 package s3
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -24,9 +25,11 @@ type MockObject struct {
 }
 
 type MockObjectVersion struct {
-	Data         []byte
-	IsLatest     bool
-	LastModified *time.Time
+	Data           []byte
+	IsLatest       bool
+	LastModified   *time.Time
+	VersionID      *string
+	IsDeleteMarker bool
 }
 
 type MockBucket struct {
@@ -34,15 +37,17 @@ type MockBucket struct {
 }
 
 type MockS3ClientConfig struct {
-	Buckets          map[string]*MockBucket
-	DeleteObjectFunc func(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	Buckets                        map[string]*MockBucket
+	DeleteObjectFunc               func(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string) error
 }
 
 type mockClient struct {
 	buckets map[string]*MockBucket
 
-	// Assignable function field for customizing DeleteObject behavior
-	DeleteObjectFunc func(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	// Assignable function fields for customizing mock behavior
+	DeleteObjectFunc               func(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string) error
 }
 
 func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
@@ -51,8 +56,21 @@ func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
 		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
 	}
 	var objects []string
-	for k := range bucket.Objects {
-		objects = append(objects, k)
+	for k, obj := range bucket.Objects {
+		if obj == nil || len(obj.Versions) == 0 {
+			objects = append(objects, k)
+			continue
+		}
+		latestIsDeleteMarker := false
+		for _, v := range obj.Versions {
+			if v != nil && v.IsLatest && v.IsDeleteMarker {
+				latestIsDeleteMarker = true
+				break
+			}
+		}
+		if !latestIsDeleteMarker {
+			objects = append(objects, k)
+		}
 	}
 	return objects, nil
 }
@@ -70,6 +88,40 @@ func (m *mockClient) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput,
 
 	delete(bucket.Objects, input.ObjectKey)
 	return nil, nil
+}
+
+func (m *mockClient) DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string) error {
+	if m.DeleteExpiredDeleteMarkersFunc != nil {
+		return m.DeleteExpiredDeleteMarkersFunc(ctx, bucketFQN)
+	}
+	if m.buckets == nil {
+		return nil
+	}
+	bucket, ok := m.buckets[bucketFQN]
+	if !ok {
+		return fmt.Errorf("no such bucket %q", bucketFQN)
+	}
+	for key, obj := range bucket.Objects {
+		if obj == nil || len(obj.Versions) == 0 {
+			continue
+		}
+		hasObjectVersion := false
+		hasDeleteMarker := false
+		for _, v := range obj.Versions {
+			if v == nil {
+				continue
+			}
+			if v.IsDeleteMarker {
+				hasDeleteMarker = true
+			} else {
+				hasObjectVersion = true
+			}
+		}
+		if hasDeleteMarker && !hasObjectVersion {
+			delete(bucket.Objects, key)
+		}
+	}
+	return nil
 }
 
 func (m *mockClient) GetObject(
@@ -95,5 +147,9 @@ func (m *mockClient) UploadObject(input UploadObjectInput) (*UploadObjectOutput,
 }
 
 func CreateMockS3Client(config MockS3ClientConfig) Client {
-	return &mockClient{buckets: config.Buckets, DeleteObjectFunc: config.DeleteObjectFunc}
+	return &mockClient{
+		buckets:                        config.Buckets,
+		DeleteObjectFunc:               config.DeleteObjectFunc,
+		DeleteExpiredDeleteMarkersFunc: config.DeleteExpiredDeleteMarkersFunc,
+	}
 }

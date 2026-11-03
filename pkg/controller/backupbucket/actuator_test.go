@@ -41,6 +41,7 @@ import (
 
 	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/auth"
 	gdcclient "github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/client"
+	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/s3"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc"
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc/v1alpha1"
 	gdcconstants "github.com/gardener/gardener-extension-provider-gdc/pkg/gdc"
@@ -61,11 +62,24 @@ const (
 type mockClientFactory struct {
 	// Fields to hold the mock functions
 	mockGetOrgClientFn func(gdchConfig *gdcclient.OrgClusterConfig, serviceAccount *auth.ServiceAccount, scheme *runtime.Scheme) (client.Client, error)
+	mockNewS3ClientFn  func(config *s3.Config) (s3.Client, error)
 }
 
 // GetOrgClient calls the mock function.
 func (m *mockClientFactory) GetOrgClient(gdchConfig *gdcclient.OrgClusterConfig, serviceAccount *auth.ServiceAccount, scheme *runtime.Scheme) (client.Client, error) {
 	return m.mockGetOrgClientFn(gdchConfig, serviceAccount, scheme)
+}
+
+// NewS3Client calls the mock function or returns an empty mock S3 client.
+func (m *mockClientFactory) NewS3Client(config *s3.Config) (s3.Client, error) {
+	if m.mockNewS3ClientFn != nil {
+		return m.mockNewS3ClientFn(config)
+	}
+	return s3.CreateMockS3Client(s3.MockS3ClientConfig{
+		Buckets: map[string]*s3.MockBucket{
+			fullyQualifiedBucketName: {Objects: map[string]*s3.MockObject{}},
+		},
+	}), nil
 }
 
 func TestActuator_ZonalBucket_Reconcile(t *testing.T) {
@@ -1183,4 +1197,205 @@ func TestGetLifecyclePolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newStrictDecodeInterceptor() interceptor.Funcs {
+	rejectExpiredDeleteMarker := func(obj client.Object) error {
+		var lc *objectv1.LifecyclePolicy
+		switch b := obj.(type) {
+		case *objectv1.Bucket:
+			if b.Spec.BucketPolicy != nil {
+				lc = b.Spec.BucketPolicy.LifecyclePolicy
+			}
+		case *globalv1.Bucket:
+			if b.Spec.BucketPolicy != nil {
+				lc = b.Spec.BucketPolicy.LifecyclePolicy
+			}
+		}
+		if lc != nil {
+			for _, r := range lc.LifecycleRules {
+				if r != nil && r.ExpiredObjectDeleteMarker != nil {
+					return apierrors.NewInvalid(
+						objectv1.SchemeGroupVersion.WithKind("Bucket").GroupKind(),
+						obj.GetName(),
+						nil,
+					)
+				}
+			}
+		}
+		return nil
+	}
+	wrapErr := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf(`%w: strict decoding error: unknown field "spec.bucketPolicy.lifecyclePolicy.lifecycleRules[0].expiredObjectDeleteMarker"`, err)
+	}
+	return interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if ssr, ok := obj.(*authorizationv1.SelfSubjectRulesReview); ok {
+				ssr.Status.ResourceRules = []authorizationv1.ResourceRule{
+					{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{credentialSecretName}},
+				}
+			}
+			if err := rejectExpiredDeleteMarker(obj); err != nil {
+				return wrapErr(err)
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if err := rejectExpiredDeleteMarker(obj); err != nil {
+				return wrapErr(err)
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+	}
+}
+
+func TestLegacyGDC1162Compatibility_FallbackAndDeleteMarkerSweep(t *testing.T) {
+	decoder := serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder()
+	sa := &auth.ServiceAccount{Name: serviceAccountName, Project: testProject}
+
+	t.Run("creates zonal and dual-zone buckets without expiredObjectDeleteMarker when GDC 1.16.2 CRD rejects field", func(t *testing.T) {
+		orgClient := fake.NewClientBuilder().
+			WithScheme(getRuntimeScheme()).
+			WithInterceptorFuncs(newStrictDecodeInterceptor()).
+			Build()
+
+		if err := createZonalBucketIfNotExists(context.Background(), decoder, backupBucketName, nil, orgClient, sa); err != nil {
+			t.Fatalf("createZonalBucketIfNotExists failed on legacy 1.16.2: %v", err)
+		}
+		zonalGot := &objectv1.Bucket{}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, zonalGot); err != nil {
+			t.Fatalf("failed to get zonal bucket: %v", err)
+		}
+		wantFallbackLC := &objectv1.LifecyclePolicy{
+			Enable: true,
+			LifecycleRules: []*objectv1.LifecycleRule{
+				{
+					ID:     ptr.To(backupLifecycleRuleID),
+					Status: ptr.To(objectv1.Enabled),
+					NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{
+						NoncurrentDays: ptr.To(int64(1)),
+					},
+				},
+			},
+		}
+		if diff := cmp.Diff(wantFallbackLC, zonalGot.Spec.BucketPolicy.LifecyclePolicy); diff != "" {
+			t.Fatalf("zonal fallback LifecyclePolicy mismatch (-want +got):\n%s", diff)
+		}
+
+		dzConfig := &runtime.RawExtension{
+			Raw: encode(&gdc.BackupBucketConfig{
+				TypeMeta:               metav1.TypeMeta{Kind: "BackupBucketConfig", APIVersion: gdc.SchemeGroupVersion.String()},
+				DualZoneBucketLocation: "syncz1z2",
+			}),
+		}
+		if err := createDualZoneBucketIfNotExists(context.Background(), decoder, backupBucketName+"-dz", dzConfig, orgClient, sa); err != nil {
+			t.Fatalf("createDualZoneBucketIfNotExists failed on legacy 1.16.2: %v", err)
+		}
+		dzGot := &globalv1.Bucket{}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName + "-dz", Namespace: testProject}, dzGot); err != nil {
+			t.Fatalf("failed to get dual-zone bucket: %v", err)
+		}
+		if diff := cmp.Diff(wantFallbackLC, dzGot.Spec.BucketPolicy.LifecyclePolicy); diff != "" {
+			t.Fatalf("dual-zone fallback LifecyclePolicy mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("backfills missing lifecyclePolicy on pre-existing locked bucket and reconciles sweeping expired delete markers", func(t *testing.T) {
+		existingLockedBucket := newBucket(backupBucketName, true)
+		existingLockedBucket.Spec.BucketPolicy = &objectv1.BucketPolicy{
+			LockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(1))},
+		}
+		accessKeySecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      credentialSecretName,
+				Namespace: storage.ObjectStorageAccessKeyNamespace,
+				Labels:    map[string]string{objectv1.SubjectTypeLabel: "User"},
+				Annotations: map[string]string{
+					objectv1.SubjectAnnotation: fmt.Sprintf("system:serviceaccount:%s:%s", testProject, serviceAccountName),
+				},
+			},
+			Data: map[string][]byte{
+				"access-key-id":     []byte(testAccessKeyID),
+				"secret-access-key": []byte(testSecretAccessKey),
+			},
+		}
+		credSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: credentialSecretName, Namespace: testProject},
+			Data: map[string][]byte{
+				"serviceaccount.json": []byte(fmt.Sprintf(`{"Name":%q,"project":%q}`, serviceAccountName, testProject)),
+				"gdch-config":         []byte(`{"caData":"ZmFrZS1jYWRhdGE=","orgClusterURL":"https://management-kube.apiserver.gdc1.us-west16-c.s.gpcdemolabs.com"}`),
+			},
+		}
+		bb := &extensionsv1alpha1.BackupBucket{
+			ObjectMeta: metav1.ObjectMeta{Name: backupBucketName},
+			Spec: extensionsv1alpha1.BackupBucketSpec{
+				Region:    "us-west1",
+				SecretRef: corev1.SecretReference{Name: credentialSecretName, Namespace: testProject},
+			},
+		}
+
+		orgClient := fake.NewClientBuilder().
+			WithScheme(getRuntimeScheme()).
+			WithObjects(existingLockedBucket, accessKeySecret).
+			WithInterceptorFuncs(newStrictDecodeInterceptor()).
+			WithStatusSubresource(&objectv1.Bucket{}).
+			Build()
+		gardenClient := newTestClient(bb, credSecret)
+
+		mockBucket := &s3.MockBucket{
+			Objects: map[string]*s3.MockObject{
+				"shoot-1/expired-snap": {
+					Versions: []*s3.MockObjectVersion{
+						{VersionID: ptr.To("dm-1"), IsDeleteMarker: true, IsLatest: true},
+					},
+				},
+				"shoot-1/recoverable-snap": {
+					Versions: []*s3.MockObjectVersion{
+						{VersionID: ptr.To("dm-2"), IsDeleteMarker: true, IsLatest: true},
+						{VersionID: ptr.To("v-1"), Data: []byte("backup"), IsLatest: false},
+					},
+				},
+			},
+		}
+
+		a := &actuator{
+			client:  gardenClient,
+			decoder: decoder,
+			clientFactory: &mockClientFactory{
+				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
+					return orgClient, nil
+				},
+				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
+					return s3.CreateMockS3Client(s3.MockS3ClientConfig{
+						Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: mockBucket},
+					}), nil
+				},
+			},
+		}
+
+		if err := a.Reconcile(context.Background(), logr.Logger{}, bb); err != nil {
+			t.Fatalf("Reconcile() failed on legacy 1.16.2 existing bucket: %v", err)
+		}
+
+		updatedBucket := &objectv1.Bucket{}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, updatedBucket); err != nil {
+			t.Fatalf("failed to get updated bucket: %v", err)
+		}
+		if updatedBucket.Spec.BucketPolicy.LifecyclePolicy == nil || len(updatedBucket.Spec.BucketPolicy.LifecyclePolicy.LifecycleRules) != 1 {
+			t.Fatalf("expected backfilled LifecyclePolicy on existing bucket, got %+v", updatedBucket.Spec.BucketPolicy.LifecyclePolicy)
+		}
+		if updatedBucket.Spec.BucketPolicy.LifecyclePolicy.LifecycleRules[0].ExpiredObjectDeleteMarker != nil {
+			t.Fatalf("expected nil ExpiredObjectDeleteMarker on legacy 1.16.2, got %v", updatedBucket.Spec.BucketPolicy.LifecyclePolicy.LifecycleRules[0].ExpiredObjectDeleteMarker)
+		}
+
+		if _, exists := mockBucket.Objects["shoot-1/expired-snap"]; exists {
+			t.Errorf("expected expired delete marker key shoot-1/expired-snap to be swept during Reconcile")
+		}
+		if _, exists := mockBucket.Objects["shoot-1/recoverable-snap"]; !exists {
+			t.Errorf("expected recoverable key shoot-1/recoverable-snap (with noncurrent version) to be preserved")
+		}
+	})
 }

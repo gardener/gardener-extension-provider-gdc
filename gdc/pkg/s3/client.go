@@ -15,12 +15,14 @@
 package s3
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -86,6 +88,7 @@ type DeleteObjectOutput struct {
 type Client interface {
 	ListObjectsV2Pages(bucketFQN string) ([]string, error)
 	DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error)
+	DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string) error
 	UploadObject(input UploadObjectInput) (*UploadObjectOutput, error)
 	GetObject(input GetObjectInput, opts ...GetObjectOption) (*GetObjectOutput, error)
 }
@@ -189,6 +192,90 @@ func (s3Client *s3Client) DeleteObject(input DeleteObjectInput) (*DeleteObjectOu
 	}
 
 	return output, nil
+}
+
+// DeleteExpiredDeleteMarkers lists all object versions and delete markers in the bucket and deletes
+// only expired object delete markers — i.e., delete markers for keys that have zero remaining
+// current or noncurrent object versions. Keys that still have any object version (such as soft-deleted
+// backups within their noncurrentExpiration retention window) are never modified.
+func (s3Client *s3Client) DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string) error {
+	keysWithVersions := make(map[string]struct{})
+	deleteMarkersByKey := make(map[string][]string)
+
+	input := &s3.ListObjectVersionsInput{
+		Bucket:  aws.String(bucketFQN),
+		MaxKeys: aws.Int64(1000),
+	}
+	err := s3Client.s3API.ListObjectVersionsPagesWithContext(
+		ctx,
+		input,
+		func(page *s3.ListObjectVersionsOutput, _ bool) bool {
+			for _, v := range page.Versions {
+				if v != nil && v.Key != nil {
+					keysWithVersions[*v.Key] = struct{}{}
+				}
+			}
+			for _, dm := range page.DeleteMarkers {
+				if dm != nil && dm.Key != nil && dm.VersionId != nil {
+					deleteMarkersByKey[*dm.Key] = append(deleteMarkersByKey[*dm.Key], *dm.VersionId)
+				}
+			}
+			return true
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	expiredKeys := make([]string, 0)
+	for key := range deleteMarkersByKey {
+		if _, hasVersion := keysWithVersions[key]; !hasVersion {
+			expiredKeys = append(expiredKeys, key)
+		}
+	}
+	if len(expiredKeys) == 0 {
+		return nil
+	}
+	sort.Strings(expiredKeys)
+
+	identifiers := make([]*s3.ObjectIdentifier, 0, len(expiredKeys))
+	for _, key := range expiredKeys {
+		for _, versionID := range deleteMarkersByKey[key] {
+			identifiers = append(identifiers, &s3.ObjectIdentifier{
+				Key:       aws.String(key),
+				VersionId: aws.String(versionID),
+			})
+		}
+	}
+
+	const maxDeleteBatchSize = 1000
+	for start := 0; start < len(identifiers); start += maxDeleteBatchSize {
+		end := start + maxDeleteBatchSize
+		if end > len(identifiers) {
+			end = len(identifiers)
+		}
+		output, err := s3Client.s3API.DeleteObjectsWithContext(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucketFQN),
+			Delete: &s3.Delete{
+				Objects: identifiers[start:end],
+				Quiet:   aws.Bool(true),
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if output != nil && len(output.Errors) > 0 {
+			objErr := output.Errors[0]
+			return fmt.Errorf("failed to delete expired delete marker %q version %q: %s: %s",
+				aws.StringValue(objErr.Key),
+				aws.StringValue(objErr.VersionId),
+				aws.StringValue(objErr.Code),
+				aws.StringValue(objErr.Message),
+			)
+		}
+	}
+
+	return nil
 }
 
 // Uses PutObject or Multipart Upload awssdk API depending on file size

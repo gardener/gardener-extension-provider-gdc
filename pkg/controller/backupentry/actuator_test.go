@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/util/cert"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -251,6 +252,70 @@ func TestActuator_Delete(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("sweeps expired delete markers when locked bucket lacks native ExpiredObjectDeleteMarker", func(t *testing.T) {
+		lockedBucket := newBucket(testBucketName, defaultS3Endpoint, defaultRegion)
+		lockedBucket.Spec.BucketPolicy = &objectv1.BucketPolicy{
+			LockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(1))},
+			LifecyclePolicy: &objectv1.LifecyclePolicy{
+				Enable: true,
+				LifecycleRules: []*objectv1.LifecycleRule{
+					{
+						ID:     ptr.To("expire-noncurrent-backup-versions"),
+						Status: ptr.To(objectv1.Enabled),
+						NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{
+							NoncurrentDays: ptr.To(int64(1)),
+						},
+					},
+				},
+			},
+		}
+
+		mockBucket := &s3.MockBucket{
+			Objects: map[string]*s3.MockObject{
+				"my-shoot/current": {
+					Versions: []*s3.MockObjectVersion{{VersionID: ptr.To("v1"), Data: []byte("live"), IsLatest: true}},
+				},
+				"old-shoot/expired-marker": {
+					Versions: []*s3.MockObjectVersion{{VersionID: ptr.To("dm-old"), IsDeleteMarker: true, IsLatest: true}},
+				},
+				"recent-shoot/still-recoverable": {
+					Versions: []*s3.MockObjectVersion{
+						{VersionID: ptr.To("dm-recent"), IsDeleteMarker: true, IsLatest: true},
+						{VersionID: ptr.To("v-recent"), Data: []byte("retained"), IsLatest: false},
+					},
+				},
+			},
+		}
+
+		a := &actuator{
+			client:  newTestClient(credentialSecret),
+			decoder: serializer.NewCodecFactory(runtime.NewScheme(), serializer.EnableStrict).UniversalDecoder(),
+			clientFactory: &mockClientFactory{
+				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
+					return s3.CreateMockS3Client(s3.MockS3ClientConfig{
+						Buckets: map[string]*s3.MockBucket{testBucketFQN: mockBucket},
+					}), nil
+				},
+				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
+					return newTestClient(lockedBucket, accessKeySecret), nil
+				},
+			},
+		}
+
+		if err := a.Delete(context.Background(), logr.Logger{}, baseBackupEntry); err != nil {
+			t.Fatalf("Delete() failed: %v", err)
+		}
+		if _, exists := mockBucket.Objects["my-shoot/current"]; exists {
+			t.Errorf("expected my-shoot/current to be deleted")
+		}
+		if _, exists := mockBucket.Objects["old-shoot/expired-marker"]; exists {
+			t.Errorf("expected orphaned delete marker old-shoot/expired-marker to be swept")
+		}
+		if _, exists := mockBucket.Objects["recent-shoot/still-recoverable"]; !exists {
+			t.Errorf("expected recent-shoot/still-recoverable (with noncurrent version) to be preserved")
+		}
+	})
 }
 
 // newTestClient creates a fake client with the necessary schemes.
