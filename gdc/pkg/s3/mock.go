@@ -17,6 +17,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -50,32 +51,50 @@ type mockClient struct {
 	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string) error
 }
 
-func (m *mockClient) ListObjectsV2Pages(bucketFQN string) ([]string, error) {
+func (m *mockClient) DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
+	if prefix == "" {
+		return fmt.Errorf("object deletion requires a non-empty prefix")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	bucket, ok := m.buckets[bucketFQN]
 	if !ok {
-		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
+		return fmt.Errorf("no such bucket %q", bucketFQN)
 	}
-	var objects []string
 	for k, obj := range bucket.Objects {
-		if obj == nil || len(obj.Versions) == 0 {
-			objects = append(objects, k)
+		if !strings.HasPrefix(k, prefix) {
 			continue
 		}
-		latestIsDeleteMarker := false
-		for _, v := range obj.Versions {
-			if v != nil && v.IsLatest && v.IsDeleteMarker {
-				latestIsDeleteMarker = true
-				break
-			}
+		// Keys whose latest version is already a delete marker are not "current"
+		// objects and would not be returned by a ListObjectsV2 listing.
+		if isLatestVersionDeleteMarker(obj) {
+			continue
 		}
-		if !latestIsDeleteMarker {
-			objects = append(objects, k)
+		if _, err := m.DeleteObject(ctx, DeleteObjectInput{BucketFqn: bucketFQN, ObjectKey: k}); err != nil {
+			return err
 		}
 	}
-	return objects, nil
+	return nil
 }
 
-func (m *mockClient) DeleteObject(input DeleteObjectInput) (*DeleteObjectOutput, error) {
+// isLatestVersionDeleteMarker reports whether the mock object's current version is a delete marker.
+func isLatestVersionDeleteMarker(obj *MockObject) bool {
+	if obj == nil {
+		return false
+	}
+	for _, v := range obj.Versions {
+		if v != nil && v.IsLatest && v.IsDeleteMarker {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mockClient) DeleteObject(ctx context.Context, input DeleteObjectInput) (*DeleteObjectOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Call the custom function if provided
 	if m.DeleteObjectFunc != nil {
 		return m.DeleteObjectFunc(input)

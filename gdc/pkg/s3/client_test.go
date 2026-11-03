@@ -1,155 +1,238 @@
-// Copyright 2026 Google LLC
+// SPDX-FileCopyrightText: Contributors to the Gardener project
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package s3
 
 import (
 	"context"
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
-	awss3 "github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
-	"github.com/google/go-cmp/cmp"
+	"time"
 )
 
-type fakeS3API struct {
-	s3iface.S3API
-	listObjectVersionsPagesFn func(aws.Context, *awss3.ListObjectVersionsInput, func(*awss3.ListObjectVersionsOutput, bool) bool, ...request.Option) error
-	deleteObjectsFn           func(aws.Context, *awss3.DeleteObjectsInput, ...request.Option) (*awss3.DeleteObjectsOutput, error)
+func testS3Client(t *testing.T, server *httptest.Server) Client {
+	t.Helper()
+	c, err := NewGDCHS3Client(&Config{AccessKeyId: "test", SecretAccessKey: "test", Region: "test",
+		EndpointUrl: server.URL, CustomHttpClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
-func (f *fakeS3API) ListObjectVersionsPagesWithContext(ctx aws.Context, input *awss3.ListObjectVersionsInput, fn func(*awss3.ListObjectVersionsOutput, bool) bool, opts ...request.Option) error {
-	return f.listObjectVersionsPagesFn(ctx, input, fn, opts...)
-}
-
-func (f *fakeS3API) DeleteObjectsWithContext(ctx aws.Context, input *awss3.DeleteObjectsInput, opts ...request.Option) (*awss3.DeleteObjectsOutput, error) {
-	return f.deleteObjectsFn(ctx, input, opts...)
-}
-
-func TestDeleteExpiredDeleteMarkers_CrossPageSafetyAndCleanup(t *testing.T) {
-	var deleted []string
-	api := &fakeS3API{
-		listObjectVersionsPagesFn: func(_ aws.Context, _ *awss3.ListObjectVersionsInput, fn func(*awss3.ListObjectVersionsOutput, bool) bool, _ ...request.Option) error {
-			// Page 1: "shoot-a/live-snap" has a DeleteMarker here, while its noncurrent ObjectVersion is on Page 2.
-			// "shoot-b/expired-1" has two DeleteMarkers and zero ObjectVersions anywhere.
-			cont := fn(&awss3.ListObjectVersionsOutput{
-				DeleteMarkers: []*awss3.DeleteMarkerEntry{
-					{Key: aws.String("shoot-a/live-snap"), VersionId: aws.String("dm-live")},
-					{Key: aws.String("shoot-b/expired-1"), VersionId: aws.String("dm-exp-1")},
-					{Key: aws.String("shoot-b/expired-1"), VersionId: aws.String("dm-exp-2")},
-				},
-			}, false)
-			if !cont {
-				return nil
-			}
-			// Page 2: noncurrent ObjectVersion for "shoot-a/live-snap", plus another expired DeleteMarker "shoot-c/expired-2".
-			fn(&awss3.ListObjectVersionsOutput{
-				Versions: []*awss3.ObjectVersion{
-					{Key: aws.String("shoot-a/live-snap"), VersionId: aws.String("v-noncurrent")},
-					{Key: aws.String("shoot-d/active"), VersionId: aws.String("v-current")},
-				},
-				DeleteMarkers: []*awss3.DeleteMarkerEntry{
-					{Key: aws.String("shoot-c/expired-2"), VersionId: aws.String("dm-exp-3")},
-				},
-			}, true)
-			return nil
-		},
-		deleteObjectsFn: func(_ aws.Context, input *awss3.DeleteObjectsInput, _ ...request.Option) (*awss3.DeleteObjectsOutput, error) {
-			for _, obj := range input.Delete.Objects {
-				deleted = append(deleted, fmt.Sprintf("%s@%s", aws.StringValue(obj.Key), aws.StringValue(obj.VersionId)))
-			}
-			return &awss3.DeleteObjectsOutput{}, nil
-		},
-	}
-
-	cl := &s3Client{s3API: api}
-	if err := cl.DeleteExpiredDeleteMarkers(context.Background(), "bucket-fqn"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{
-		"shoot-b/expired-1@dm-exp-1",
-		"shoot-b/expired-1@dm-exp-2",
-		"shoot-c/expired-2@dm-exp-3",
-	}
-	if diff := cmp.Diff(want, deleted); diff != "" {
-		t.Fatalf("deleted markers mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestDeleteExpiredDeleteMarkers_BatchesOver1000AndSurfacesItemErrors(t *testing.T) {
-	t.Run("batches more than 1000 expired delete markers", func(t *testing.T) {
-		var batchSizes []int
-		api := &fakeS3API{
-			listObjectVersionsPagesFn: func(_ aws.Context, _ *awss3.ListObjectVersionsInput, fn func(*awss3.ListObjectVersionsOutput, bool) bool, _ ...request.Option) error {
-				markers := make([]*awss3.DeleteMarkerEntry, 1205)
-				for i := range markers {
-					markers[i] = &awss3.DeleteMarkerEntry{
-						Key:       aws.String(fmt.Sprintf("shoot/key-%04d", i)),
-						VersionId: aws.String(fmt.Sprintf("dm-%04d", i)),
-					}
+// Run through the real AWS SDK's pagination and XML protocol. The server models
+// current objects becoming hidden by delete markers, while versions remain.
+func TestDeleteObjectsWithPrefixPaginationAndRetry(t *testing.T) {
+	for _, failedObjects := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("failedObjects=%d", failedObjects), func(t *testing.T) {
+			var mu sync.Mutex
+			current := map[string]bool{"shoot/a": true, "shoot/b": true, "shoot/c": true, "shoot/d": true, "other/a": true, "shoot-other/a": true}
+			markers := map[string]int{}
+			listCalls, deleteCalls := 0, 0
+			failOnce := failedObjects > 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				w.Header().Set("Content-Type", "application/xml")
+				if r.URL.Path != "/bucket" {
+					t.Errorf("unexpected bucket path: %s", r.URL.Path)
 				}
-				fn(&awss3.ListObjectVersionsOutput{DeleteMarkers: markers}, true)
-				return nil
-			},
-			deleteObjectsFn: func(_ aws.Context, input *awss3.DeleteObjectsInput, _ ...request.Option) (*awss3.DeleteObjectsOutput, error) {
-				batchSizes = append(batchSizes, len(input.Delete.Objects))
-				return &awss3.DeleteObjectsOutput{}, nil
-			},
-		}
+				switch r.Method {
+				case http.MethodGet:
+					listCalls++
+					q := r.URL.Query()
+					if q.Get("prefix") != "shoot/" || q.Get("list-type") != "2" || q.Get("max-keys") != "1000" {
+						t.Errorf("unexpected list parameters: %v", q)
+					}
+					if q.Get("continuation-token") != "" && deleteCalls == 0 {
+						t.Error("listed next page before deleting the first page")
+					}
+					var keys []string
+					for key, visible := range current {
+						if visible && strings.HasPrefix(key, q.Get("prefix")) && key > q.Get("continuation-token") {
+							keys = append(keys, key)
+						}
+					}
+					sort.Strings(keys)
+					truncated := len(keys) > 2
+					if truncated {
+						keys = keys[:2]
+					}
+					fmt.Fprintf(w, "<ListBucketResult><IsTruncated>%v</IsTruncated>", truncated)
+					for _, key := range keys {
+						fmt.Fprintf(w, "<Contents><Key>%s</Key></Contents>", key)
+					}
+					if truncated {
+						fmt.Fprintf(w, "<NextContinuationToken>%s</NextContinuationToken>", keys[len(keys)-1])
+					}
+					fmt.Fprint(w, "</ListBucketResult>")
+				case http.MethodPost:
+					deleteCalls++
+					if !r.URL.Query().Has("delete") {
+						t.Error("expected multi-object delete")
+					}
+					var input struct {
+						Objects []struct {
+							Key       string
+							VersionID *string
+						} `xml:"Object"`
+					}
+					if err := xml.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Error(err)
+					}
+					if len(input.Objects) == 0 || len(input.Objects) > 1000 {
+						t.Errorf("unexpected batch size %d", len(input.Objects))
+					}
+					fmt.Fprint(w, "<DeleteResult>")
+					for _, object := range input.Objects {
+						if object.VersionID != nil || !strings.HasPrefix(object.Key, "shoot/") {
+							t.Errorf("unexpected permanent or out-of-prefix deletion: %+v", object)
+						}
+						if failOnce && (object.Key == "shoot/b" || (failedObjects == 2 && object.Key == "shoot/a")) {
+							fmt.Fprintf(w, "<Error><Key>%s</Key><Code>AccessDenied</Code><Message>injected failure</Message></Error>", object.Key)
+							continue
+						}
+						current[object.Key] = false
+						markers[object.Key]++
+					}
+					failOnce = false
+					fmt.Fprint(w, "</DeleteResult>")
+				default:
+					t.Errorf("unexpected S3 request: %s", r.Method)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			c := testS3Client(t, server)
+			err := c.DeleteObjectsWithPrefix(context.Background(), "bucket", "shoot/")
+			if failedObjects > 0 {
+				firstFailedKey := "shoot/b"
+				if failedObjects == 2 {
+					firstFailedKey = "shoot/a"
+				}
+				expectedError := fmt.Sprintf("%d objects failed to delete; first: %q: AccessDenied: injected failure", failedObjects, firstFailedKey)
+				if err == nil || err.Error() != expectedError {
+					t.Fatalf("expected per-object error, got %v", err)
+				}
+				mu.Lock()
+				calls := listCalls
+				mu.Unlock()
+				if calls != 1 {
+					t.Fatalf("pagination should stop on delete failure, got %d list calls", calls)
+				}
+				if err := c.DeleteObjectsWithPrefix(context.Background(), "bucket", "shoot/"); err != nil {
+					t.Fatal(err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			// Once the listing reflects the deletions, an empty-prefix retry must
+			// not add more delete markers. This server models consistent listings.
+			if err := c.DeleteObjectsWithPrefix(context.Background(), "bucket", "shoot/"); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for key, visible := range current {
+				if strings.HasPrefix(key, "shoot/") {
+					if visible || markers[key] != 1 {
+						t.Errorf("key %s: visible=%v markers=%d", key, visible, markers[key])
+					}
+				} else if !visible || markers[key] != 0 {
+					t.Errorf("unrelated key %s was changed", key)
+				}
+			}
+		})
+	}
+}
 
-		cl := &s3Client{s3API: api}
-		if err := cl.DeleteExpiredDeleteMarkers(context.Background(), "bucket-fqn"); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if diff := cmp.Diff([]int{1000, 205}, batchSizes); diff != "" {
-			t.Fatalf("batch sizes mismatch (-want +got):\n%s", diff)
-		}
-	})
+func TestS3DeletionCancellation(t *testing.T) {
+	for _, phase := range []string{"list", "batch delete", "single delete"} {
+		t.Run(phase, func(t *testing.T) {
+			reached := make(chan struct{})
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if phase == "batch delete" && r.Method == http.MethodGet {
+					fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>shoot/a</Key></Contents></ListBucketResult>")
+					return
+				}
+				// Consume the POST body so the server can observe connection closure.
+				_, _ = io.Copy(io.Discard, r.Body)
+				close(reached)
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+			}))
+			defer func() { close(release); server.Close() }()
+			c := testS3Client(t, server)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				if phase == "single delete" {
+					_, err := c.DeleteObject(ctx, DeleteObjectInput{BucketFqn: "bucket", ObjectKey: "shoot/a"})
+					result <- err
+				} else {
+					result <- c.DeleteObjectsWithPrefix(ctx, "bucket", "shoot/")
+				}
+			}()
+			select {
+			case <-reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("S3 request did not reach server")
+			}
+			cancel()
+			select {
+			case err := <-result:
+				if err == nil {
+					t.Fatal("canceled S3 request succeeded")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("S3 request did not stop after cancellation")
+			}
+		})
+	}
+}
 
-	t.Run("returns error when DeleteObjects reports per-object failure", func(t *testing.T) {
-		api := &fakeS3API{
-			listObjectVersionsPagesFn: func(_ aws.Context, _ *awss3.ListObjectVersionsInput, fn func(*awss3.ListObjectVersionsOutput, bool) bool, _ ...request.Option) error {
-				fn(&awss3.ListObjectVersionsOutput{
-					DeleteMarkers: []*awss3.DeleteMarkerEntry{
-						{Key: aws.String("shoot/key"), VersionId: aws.String("dm-1")},
-					},
-				}, true)
-				return nil
-			},
-			deleteObjectsFn: func(_ aws.Context, _ *awss3.DeleteObjectsInput, _ ...request.Option) (*awss3.DeleteObjectsOutput, error) {
-				return &awss3.DeleteObjectsOutput{
-					Errors: []*awss3.Error{
-						{
-							Key:       aws.String("shoot/key"),
-							VersionId: aws.String("dm-1"),
-							Code:      aws.String("InternalError"),
-							Message:   aws.String("transient backend failure"),
-						},
-					},
-				}, nil
-			},
-		}
+func TestDeleteObjectsWithPrefixRequiresPrefix(t *testing.T) {
+	c := &s3Client{} // Must reject the prefix before making an API call.
+	if err := c.DeleteObjectsWithPrefix(context.Background(), "bucket", ""); err == nil {
+		t.Fatal("empty prefix accepted")
+	}
+}
 
-		cl := &s3Client{s3API: api}
-		err := cl.DeleteExpiredDeleteMarkers(context.Background(), "bucket-fqn")
-		if err == nil || !strings.Contains(err.Error(), "InternalError") {
-			t.Fatalf("got error %v, want InternalError", err)
-		}
-	})
+func TestDeleteObjectsWithPrefixListErrors(t *testing.T) {
+	for _, failure := range []string{"out-of-prefix object", "missing bucket"} {
+		t.Run(failure, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Error("delete called after invalid listing")
+				}
+				if failure == "missing bucket" {
+					w.WriteHeader(http.StatusNotFound)
+					fmt.Fprint(w, "<Error><Code>NoSuchBucket</Code><Message>bucket gone</Message></Error>")
+					return
+				}
+				fmt.Fprint(w, "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>other/a</Key></Contents></ListBucketResult>")
+			}))
+			defer server.Close()
+			err := testS3Client(t, server).DeleteObjectsWithPrefix(context.Background(), "bucket", "shoot/")
+			if err == nil {
+				t.Fatal("invalid listing succeeded")
+			}
+			if failure == "missing bucket" && !errors.Is(err, ErrorS3NoSuchBucket) {
+				t.Fatalf("missing bucket error not preserved: %v", err)
+			}
+		})
+	}
 }
