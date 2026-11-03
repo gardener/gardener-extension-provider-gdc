@@ -15,7 +15,7 @@
 images:
   - name: cloud-controller-manager
     repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/cloud-controller-manager-gdch
-    tag: v0.5.5
+    tag: v0.5.6
     sourceRepository: github.com/GoogleCloudPlatform/cloud-provider-gdc
     labels:
       - name: gardener.cloud/cve-categorisation
@@ -29,7 +29,7 @@ images:
         signing: false
   - name: machine-controller-manager-provider-gdch
     repository: europe-docker.pkg.dev/gardener-project/releases/gardener/gardener-gdc-ci/machine-controller-manager-provider-gdch
-    tag: v0.5.7
+    tag: v0.5.8
     sourceRepository: github.com/gardener/machine-controller-manager-provider-gdc
     labels:
       - name: gardener.cloud/cve-categorisation
