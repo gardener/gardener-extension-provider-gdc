@@ -253,7 +253,9 @@ func TestActuator_Delete(t *testing.T) {
 		})
 	}
 
-	t.Run("sweeps expired delete markers when locked bucket lacks native ExpiredObjectDeleteMarker", func(t *testing.T) {
+	// BackupEntry deletion must stay scoped to the entry prefix: it must neither scan the whole bucket nor
+	// touch delete markers of other prefixes (that cleanup belongs to BackupBucket deletion).
+	t.Run("does not sweep bucket-wide delete markers when locked bucket lacks native ExpiredObjectDeleteMarker", func(t *testing.T) {
 		lockedBucket := newBucket(testBucketName, defaultS3Endpoint, defaultRegion)
 		lockedBucket.Spec.BucketPolicy = &objectv1.BucketPolicy{
 			LockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(1))},
@@ -288,6 +290,7 @@ func TestActuator_Delete(t *testing.T) {
 			},
 		}
 
+		sweepCalls := 0
 		a := &actuator{
 			client:  newTestClient(credentialSecret),
 			decoder: serializer.NewCodecFactory(runtime.NewScheme(), serializer.EnableStrict).UniversalDecoder(),
@@ -295,6 +298,10 @@ func TestActuator_Delete(t *testing.T) {
 				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
 					return s3.CreateMockS3Client(s3.MockS3ClientConfig{
 						Buckets: map[string]*s3.MockBucket{testBucketFQN: mockBucket},
+						DeleteExpiredDeleteMarkersFunc: func(context.Context, string, s3.DeleteExpiredDeleteMarkersOptions) (*s3.DeleteExpiredDeleteMarkersResult, error) {
+							sweepCalls++
+							return &s3.DeleteExpiredDeleteMarkersResult{}, nil
+						},
 					}), nil
 				},
 				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
@@ -306,11 +313,14 @@ func TestActuator_Delete(t *testing.T) {
 		if err := a.Delete(context.Background(), logr.Logger{}, baseBackupEntry); err != nil {
 			t.Fatalf("Delete() failed: %v", err)
 		}
+		if sweepCalls != 0 {
+			t.Errorf("expected no bucket-wide delete marker sweep during BackupEntry deletion, got %d call(s)", sweepCalls)
+		}
 		if _, exists := mockBucket.Objects["my-shoot/current"]; exists {
 			t.Errorf("expected my-shoot/current to be deleted")
 		}
-		if _, exists := mockBucket.Objects["old-shoot/expired-marker"]; exists {
-			t.Errorf("expected orphaned delete marker old-shoot/expired-marker to be swept")
+		if _, exists := mockBucket.Objects["old-shoot/expired-marker"]; !exists {
+			t.Errorf("expected delete marker old-shoot/expired-marker outside the entry prefix to be left untouched")
 		}
 		if _, exists := mockBucket.Objects["recent-shoot/still-recoverable"]; !exists {
 			t.Errorf("expected recent-shoot/still-recoverable (with noncurrent version) to be preserved")

@@ -36,6 +36,8 @@ import (
 
 const (
 	defaultS3TimeoutInSeconds = 60
+	// maxDeleteBatchSize is the maximum number of object identifiers accepted by a single DeleteObjects call.
+	maxDeleteBatchSize = 1000
 )
 
 type Config struct {
@@ -89,7 +91,7 @@ type DeleteObjectOutput struct {
 type Client interface {
 	DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error
 	DeleteObject(ctx context.Context, input DeleteObjectInput) (*DeleteObjectOutput, error)
-	DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string) error
+	DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string, opts DeleteExpiredDeleteMarkersOptions) (*DeleteExpiredDeleteMarkersResult, error)
 	UploadObject(input UploadObjectInput) (*UploadObjectOutput, error)
 	GetObject(input GetObjectInput, opts ...GetObjectOption) (*GetObjectOutput, error)
 }
@@ -228,88 +230,209 @@ func (s3Client *s3Client) DeleteObject(ctx context.Context, input DeleteObjectIn
 	return output, nil
 }
 
-// DeleteExpiredDeleteMarkers lists all object versions and delete markers in the bucket and deletes
-// only expired object delete markers — i.e., delete markers for keys that have zero remaining
-// current or noncurrent object versions. Keys that still have any object version (such as soft-deleted
-// backups within their noncurrentExpiration retention window) are never modified.
-func (s3Client *s3Client) DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string) error {
-	keysWithVersions := make(map[string]struct{})
-	deleteMarkersByKey := make(map[string][]string)
+// DeleteExpiredDeleteMarkersOptions bounds and scopes a delete marker sweep so that a single call never
+// has to iterate over an entire (potentially very large) bucket.
+type DeleteExpiredDeleteMarkersOptions struct {
+	// Prefix optionally restricts the sweep to keys starting with this prefix.
+	Prefix string
+	// KeyMarker resumes a previous sweep: listing starts after this key (exclusive).
+	KeyMarker string
+	// MaxPages bounds how many ListObjectVersions pages (up to 1000 entries each) are scanned per call.
+	// Zero or negative means unbounded.
+	MaxPages int
+}
 
+// DeleteExpiredDeleteMarkersResult reports the progress of a (possibly partial) delete marker sweep.
+type DeleteExpiredDeleteMarkersResult struct {
+	// DeletedMarkers is the number of expired delete markers removed by this call.
+	DeletedMarkers int
+	// ScannedPages is the number of ListObjectVersions pages consumed by this call.
+	ScannedPages int
+	// Completed is true when the sweep reached the end of the listing.
+	Completed bool
+	// NextKeyMarker is set when the sweep stopped before the end of the listing (Completed is false), either
+	// because the page budget was exhausted or because the context was canceled after at least one key had
+	// been fully processed and its markers deleted. Pass it as KeyMarker to a subsequent call to resume; it
+	// always lies strictly after the KeyMarker this call started from, so successive calls make progress.
+	NextKeyMarker string
+}
+
+// Done reports whether the sweep reached the end of the listing.
+func (r *DeleteExpiredDeleteMarkersResult) Done() bool {
+	return r != nil && r.Completed
+}
+
+// DeleteExpiredDeleteMarkers removes expired object delete markers, i.e. delete markers of keys that have no
+// remaining current or noncurrent object version. Keys that still own any object version (for example
+// soft-deleted backups within their noncurrent retention window) are never modified.
+//
+// The listing is processed as a stream: ListObjectVersions returns entries sorted by key with all versions and
+// delete markers of a key adjacent, so a key can be judged as soon as the listing moves past it. Only the
+// state of the key that is still "open" at a page boundary is carried over, which keeps memory usage
+// independent of the bucket size. Deletions are issued per page in batches of up to 1000 identifiers.
+//
+// With opts.MaxPages > 0 the call stops once that many pages have been scanned and at least one key has been
+// fully processed since the start of the call, and returns a NextKeyMarker from which a later call can resume;
+// the key that was open at the stop point is re-listed in full on resume. A single key spanning more pages than
+// the budget is therefore scanned to its end rather than being resumed from the same marker forever.
+//
+// When ctx is canceled mid-sweep the error is returned together with the partial result: NextKeyMarker then
+// points after the last key whose markers were actually deleted, so callers can persist the progress made so far.
+func (s3Client *s3Client) DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string, opts DeleteExpiredDeleteMarkersOptions) (*DeleteExpiredDeleteMarkersResult, error) {
+	result := &DeleteExpiredDeleteMarkersResult{}
 	input := &s3.ListObjectVersionsInput{
 		Bucket:  aws.String(bucketFQN),
 		MaxKeys: aws.Int64(1000),
 	}
-	err := s3Client.s3API.ListObjectVersionsPagesWithContext(
-		ctx,
-		input,
-		func(page *s3.ListObjectVersionsOutput, _ bool) bool {
-			for _, v := range page.Versions {
-				if v != nil && v.Key != nil {
-					keysWithVersions[*v.Key] = struct{}{}
-				}
-			}
-			for _, dm := range page.DeleteMarkers {
-				if dm != nil && dm.Key != nil && dm.VersionId != nil {
-					deleteMarkersByKey[*dm.Key] = append(deleteMarkersByKey[*dm.Key], *dm.VersionId)
-				}
-			}
-			return true
-		},
-	)
-	if err != nil {
-		return err
+	if opts.Prefix != "" {
+		input.Prefix = aws.String(opts.Prefix)
+	}
+	if opts.KeyMarker != "" {
+		input.KeyMarker = aws.String(opts.KeyMarker)
 	}
 
-	expiredKeys := make([]string, 0)
-	for key := range deleteMarkersByKey {
-		if _, hasVersion := keysWithVersions[key]; !hasVersion {
-			expiredKeys = append(expiredKeys, key)
+	// State of the key that may continue on the next page.
+	var (
+		openKey        string
+		openHasVersion bool
+		openMarkers    []*s3.ObjectIdentifier
+		// lastClosedKey is the greatest key that has been fully processed; used as the resume marker.
+		lastClosedKey string
+		// lastFlushedKey is the greatest fully processed key whose markers have been deleted; used as the
+		// resume marker when the sweep is interrupted by an error.
+		lastFlushedKey string
+		pending        []*s3.ObjectIdentifier
+		sweepErr       error
+	)
+
+	flush := func() error {
+		for len(pending) > 0 {
+			n := min(len(pending), maxDeleteBatchSize)
+			output, err := s3Client.s3API.DeleteObjectsWithContext(ctx, &s3.DeleteObjectsInput{
+				Bucket: aws.String(bucketFQN),
+				Delete: &s3.Delete{Objects: pending[:n], Quiet: aws.Bool(true)},
+			})
+			if err != nil {
+				return err
+			}
+			if output != nil && len(output.Errors) > 0 {
+				objErr := output.Errors[0]
+				return fmt.Errorf("%d expired delete markers failed to delete; first: %q version %q: %s: %s",
+					len(output.Errors), aws.StringValue(objErr.Key), aws.StringValue(objErr.VersionId),
+					aws.StringValue(objErr.Code), aws.StringValue(objErr.Message))
+			}
+			result.DeletedMarkers += n
+			pending = pending[n:]
 		}
-	}
-	if len(expiredKeys) == 0 {
+		lastFlushedKey = lastClosedKey
 		return nil
 	}
-	sort.Strings(expiredKeys)
 
-	identifiers := make([]*s3.ObjectIdentifier, 0, len(expiredKeys))
-	for _, key := range expiredKeys {
-		for _, versionID := range deleteMarkersByKey[key] {
-			identifiers = append(identifiers, &s3.ObjectIdentifier{
-				Key:       aws.String(key),
-				VersionId: aws.String(versionID),
-			})
+	closeKey := func(key string, hasVersion bool, markers []*s3.ObjectIdentifier) {
+		if !hasVersion {
+			pending = append(pending, markers...)
 		}
+		lastClosedKey = key
 	}
 
-	const maxDeleteBatchSize = 1000
-	for start := 0; start < len(identifiers); start += maxDeleteBatchSize {
-		end := start + maxDeleteBatchSize
-		if end > len(identifiers) {
-			end = len(identifiers)
+	err := s3Client.s3API.ListObjectVersionsPagesWithContext(ctx, input, func(page *s3.ListObjectVersionsOutput, lastPage bool) bool {
+		if sweepErr = ctx.Err(); sweepErr != nil {
+			return false
 		}
-		output, err := s3Client.s3API.DeleteObjectsWithContext(ctx, &s3.DeleteObjectsInput{
-			Bucket: aws.String(bucketFQN),
-			Delete: &s3.Delete{
-				Objects: identifiers[start:end],
-				Quiet:   aws.Bool(true),
-			},
-		})
-		if err != nil {
-			return err
-		}
-		if output != nil && len(output.Errors) > 0 {
-			objErr := output.Errors[0]
-			return fmt.Errorf("failed to delete expired delete marker %q version %q: %s: %s",
-				aws.StringValue(objErr.Key),
-				aws.StringValue(objErr.VersionId),
-				aws.StringValue(objErr.Code),
-				aws.StringValue(objErr.Message),
-			)
-		}
-	}
+		result.ScannedPages++
 
-	return nil
+		// Merge the versions and delete markers of this page per key, preserving key order.
+		type keyState struct {
+			hasVersion bool
+			markers    []*s3.ObjectIdentifier
+		}
+		var orderedKeys []string
+		states := map[string]*keyState{}
+		get := func(key string) *keyState {
+			st, ok := states[key]
+			if !ok {
+				st = &keyState{}
+				states[key] = st
+				orderedKeys = append(orderedKeys, key)
+			}
+			return st
+		}
+		for _, v := range page.Versions {
+			if v != nil && v.Key != nil {
+				get(*v.Key).hasVersion = true
+			}
+		}
+		for _, dm := range page.DeleteMarkers {
+			if dm != nil && dm.Key != nil && dm.VersionId != nil {
+				st := get(*dm.Key)
+				st.markers = append(st.markers, &s3.ObjectIdentifier{Key: dm.Key, VersionId: dm.VersionId})
+			}
+		}
+		sort.Strings(orderedKeys)
+
+		for i, key := range orderedKeys {
+			st := states[key]
+			if openKey != "" && key == openKey {
+				// Continuation of the key left open by the previous page.
+				openHasVersion = openHasVersion || st.hasVersion
+				openMarkers = append(openMarkers, st.markers...)
+			} else {
+				if openKey != "" {
+					closeKey(openKey, openHasVersion, openMarkers)
+				}
+				openKey, openHasVersion, openMarkers = key, st.hasVersion, st.markers
+			}
+			// Every key except the greatest one on this page is complete; the greatest key may continue
+			// on the next page and therefore stays open.
+			if i < len(orderedKeys)-1 || lastPage {
+				closeKey(openKey, openHasVersion, openMarkers)
+				openKey, openHasVersion, openMarkers = "", false, nil
+			}
+		}
+
+		if sweepErr = flush(); sweepErr != nil {
+			return false
+		}
+		if lastPage {
+			result.Completed = true
+			return false
+		}
+		// Budget exhausted and progress made: resume after the last fully processed key so that the key
+		// still open is re-listed in full. Without a closed key (one key spanning every scanned page) keep
+		// going, otherwise a resume from the same marker could never make progress.
+		if opts.MaxPages > 0 && result.ScannedPages >= opts.MaxPages && lastClosedKey != "" {
+			result.NextKeyMarker = lastClosedKey
+			return false
+		}
+		return true
+	})
+	if sweepErr == nil {
+		sweepErr = err
+	}
+	if sweepErr != nil {
+		// Interrupted (context canceled, listing or deletion failure): expose the progress that is safe to
+		// resume from, i.e. after the last key whose markers were actually deleted.
+		if lastFlushedKey != "" {
+			result.NextKeyMarker = lastFlushedKey
+		}
+		return result, handleAWSError(sweepErr, bucketFQN)
+	}
+	if result.NextKeyMarker == "" {
+		// The listing ended (an empty bucket yields no page callback at all). Close a key left open in case
+		// the SDK did not flag the last page; when the budget stopped the sweep, the open key is deliberately
+		// left for the resumed call instead.
+		if openKey != "" {
+			closeKey(openKey, openHasVersion, openMarkers)
+			if err := flush(); err != nil {
+				if lastFlushedKey != "" {
+					result.NextKeyMarker = lastFlushedKey
+				}
+				return result, handleAWSError(err, bucketFQN)
+			}
+		}
+		result.Completed = true
+	}
+	return result, nil
 }
 
 // Uses PutObject or Multipart Upload awssdk API depending on file size

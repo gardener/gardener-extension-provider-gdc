@@ -17,6 +17,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -40,7 +41,7 @@ type MockBucket struct {
 type MockS3ClientConfig struct {
 	Buckets                        map[string]*MockBucket
 	DeleteObjectFunc               func(input DeleteObjectInput) (*DeleteObjectOutput, error)
-	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string) error
+	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string, opts DeleteExpiredDeleteMarkersOptions) (*DeleteExpiredDeleteMarkersResult, error)
 }
 
 type mockClient struct {
@@ -48,7 +49,7 @@ type mockClient struct {
 
 	// Assignable function fields for customizing mock behavior
 	DeleteObjectFunc               func(input DeleteObjectInput) (*DeleteObjectOutput, error)
-	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string) error
+	DeleteExpiredDeleteMarkersFunc func(ctx context.Context, bucketFQN string, opts DeleteExpiredDeleteMarkersOptions) (*DeleteExpiredDeleteMarkersResult, error)
 }
 
 func (m *mockClient) DeleteObjectsWithPrefix(ctx context.Context, bucketFQN, prefix string) error {
@@ -109,38 +110,66 @@ func (m *mockClient) DeleteObject(ctx context.Context, input DeleteObjectInput) 
 	return nil, nil
 }
 
-func (m *mockClient) DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string) error {
+// DeleteExpiredDeleteMarkers mirrors the real implementation on the in-memory bucket: keys are visited in
+// sorted order, a key whose versions are all delete markers is removed, and opts.Prefix / opts.KeyMarker /
+// opts.MaxPages (one key per "page" to keep tests small) bound the sweep.
+func (m *mockClient) DeleteExpiredDeleteMarkers(ctx context.Context, bucketFQN string, opts DeleteExpiredDeleteMarkersOptions) (*DeleteExpiredDeleteMarkersResult, error) {
 	if m.DeleteExpiredDeleteMarkersFunc != nil {
-		return m.DeleteExpiredDeleteMarkersFunc(ctx, bucketFQN)
+		return m.DeleteExpiredDeleteMarkersFunc(ctx, bucketFQN, opts)
+	}
+	result := &DeleteExpiredDeleteMarkersResult{}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	if m.buckets == nil {
-		return nil
+		result.Completed = true
+		return result, nil
 	}
 	bucket, ok := m.buckets[bucketFQN]
 	if !ok {
-		return fmt.Errorf("no such bucket %q", bucketFQN)
+		return nil, fmt.Errorf("no such bucket %q", bucketFQN)
 	}
-	for key, obj := range bucket.Objects {
+	keys := make([]string, 0, len(bucket.Objects))
+	for key := range bucket.Objects {
+		if strings.HasPrefix(key, opts.Prefix) && key > opts.KeyMarker {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for i, key := range keys {
+		if err := ctx.Err(); err != nil {
+			if i > 0 {
+				result.NextKeyMarker = keys[i-1]
+			}
+			return result, err
+		}
+		if opts.MaxPages > 0 && result.ScannedPages >= opts.MaxPages {
+			result.NextKeyMarker = keys[i-1]
+			return result, nil
+		}
+		result.ScannedPages++
+		obj := bucket.Objects[key]
 		if obj == nil || len(obj.Versions) == 0 {
 			continue
 		}
-		hasObjectVersion := false
-		hasDeleteMarker := false
+		hasObjectVersion, markers := false, 0
 		for _, v := range obj.Versions {
 			if v == nil {
 				continue
 			}
 			if v.IsDeleteMarker {
-				hasDeleteMarker = true
+				markers++
 			} else {
 				hasObjectVersion = true
 			}
 		}
-		if hasDeleteMarker && !hasObjectVersion {
+		if markers > 0 && !hasObjectVersion {
 			delete(bucket.Objects, key)
+			result.DeletedMarkers += markers
 		}
 	}
-	return nil
+	result.Completed = true
+	return result, nil
 }
 
 func (m *mockClient) GetObject(

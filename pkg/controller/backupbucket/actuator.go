@@ -20,11 +20,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gardener/gardener/extensions/pkg/controller/backupbucket"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	"github.com/gardener/gardener/pkg/controllerutils/reconciler"
 	"github.com/go-logr/logr"
 	globalv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/global/object/v1"
 	objectv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/object/v1"
@@ -53,6 +56,21 @@ const (
 	generatedSecretNamespace = "garden"
 	bucketDescription        = "storage for etcd backups"
 	backupLifecycleRuleID    = "expire-noncurrent-backup-versions"
+
+	// deleteMarkerSweepKeyMarkerAnnotation stores the ListObjectVersions key marker at which a partial expired
+	// delete marker sweep stopped, so that the next BackupBucket deletion attempt resumes instead of restarting.
+	deleteMarkerSweepKeyMarkerAnnotation = "gdch.provider.extensions.gardener.cloud/delete-marker-sweep-key-marker"
+	// maxDeleteMarkerSweepPagesPerDeletion bounds the number of ListObjectVersions pages (1000 entries each)
+	// scanned per BackupBucket deletion attempt. Large buckets converge over several retries instead of
+	// blocking a single reconciliation for a long time.
+	maxDeleteMarkerSweepPagesPerDeletion = 10
+	// deleteMarkerSweepReserve is the part of the reconciliation deadline kept free for persisting the sweep
+	// progress and for the remaining deletion steps. The sweep itself is stopped this long before the deadline.
+	deleteMarkerSweepReserve = 30 * time.Second
+	// deleteMarkerSweepMaxDuration caps a single sweep when the reconciliation context carries no deadline.
+	deleteMarkerSweepMaxDuration = 2 * time.Minute
+	// deleteMarkerSweepRequeueInterval is how soon a BackupBucket deletion is retried after a partial sweep.
+	deleteMarkerSweepRequeueInterval = 15 * time.Second
 )
 
 func getGeneratedSecretName(bucketName string) string {
@@ -137,22 +155,7 @@ func (a *actuator) reconcileZonalBucket(ctx context.Context, backupBucket *exten
 		return fmt.Errorf("RetryableError: failed to update BackupBucket annotations: %w", err)
 	}
 
-	accessKeys, caDataBytes, err := a.updateBackupBucketStatus(ctx, backupBucket, bucket.Status.Endpoint, bucket.Status.Region, bucketClient)
-	if err != nil {
-		return err
-	}
-
-	var lockingPolicy *objectv1.LockingPolicy
-	var lifecyclePolicy *objectv1.LifecyclePolicy
-	if bucket.Spec.BucketPolicy != nil {
-		lockingPolicy = bucket.Spec.BucketPolicy.LockingPolicy
-		lifecyclePolicy = bucket.Spec.BucketPolicy.LifecyclePolicy
-	}
-	if storage.NeedsExpiredDeleteMarkerSweep(lockingPolicy, lifecyclePolicy) {
-		a.sweepExpiredDeleteMarkersBestEffort(ctx, bucket.Name, bucket.Status.FullyQualifiedName, bucket.Status.Endpoint, bucket.Status.Region, accessKeys, caDataBytes)
-	}
-
-	return nil
+	return a.updateBackupBucketStatus(ctx, backupBucket, bucket.Status.Endpoint, bucket.Status.Region, bucketClient)
 }
 
 func (a *actuator) reconcileDualZoneBucket(ctx context.Context, backupBucket *extensionsv1alpha1.BackupBucket, bucketClient *backupBucketClientConfig) error {
@@ -169,22 +172,7 @@ func (a *actuator) reconcileDualZoneBucket(ctx context.Context, backupBucket *ex
 		return fmt.Errorf("RetryableError: failed to update BackupBucket annotations: %w", err)
 	}
 
-	accessKeys, caDataBytes, err := a.updateBackupBucketStatus(ctx, backupBucket, bucket.Status.GlobalEndpoint, bucket.Status.Region, bucketClient)
-	if err != nil {
-		return err
-	}
-
-	var lockingPolicy *objectv1.LockingPolicy
-	var lifecyclePolicy *objectv1.LifecyclePolicy
-	if bucket.Spec.BucketPolicy != nil {
-		lockingPolicy = bucket.Spec.BucketPolicy.LockingPolicy
-		lifecyclePolicy = bucket.Spec.BucketPolicy.LifecyclePolicy
-	}
-	if storage.NeedsExpiredDeleteMarkerSweep(lockingPolicy, lifecyclePolicy) {
-		a.sweepExpiredDeleteMarkersBestEffort(ctx, bucket.Name, bucket.Status.FullyQualifiedName, bucket.Status.GlobalEndpoint, bucket.Status.Region, accessKeys, caDataBytes)
-	}
-
-	return nil
+	return a.updateBackupBucketStatus(ctx, backupBucket, bucket.Status.GlobalEndpoint, bucket.Status.Region, bucketClient)
 }
 
 func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *extensionsv1alpha1.BackupBucket) error {
@@ -213,7 +201,9 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 	bucketToDelete.SetName(backupBucket.Name)
 	bucketToDelete.SetNamespace(bucketClient.serviceAccount.Project)
 
-	a.sweepExpiredDeleteMarkersBeforeBucketDelete(ctx, bucketToDelete, bucketClient)
+	if err := a.sweepExpiredDeleteMarkersBeforeBucketDelete(ctx, backupBucket, bucketToDelete, bucketClient); err != nil {
+		return errors.DetermineError(err)
+	}
 
 	if err := bucketClient.orgClient.Delete(ctx, bucketToDelete); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -237,13 +227,25 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 	return nil
 }
 
-func (a *actuator) sweepExpiredDeleteMarkersBeforeBucketDelete(ctx context.Context, bucketObject client.Object, bucketClient *backupBucketClientConfig) {
+// sweepExpiredDeleteMarkersBeforeBucketDelete removes orphaned delete markers (keys without any remaining
+// object version) from the GDC bucket before its Bucket resource is deleted. GDC refuses to delete a bucket that
+// still holds delete markers, and buckets created before native ExpiredObjectDeleteMarker support never get rid
+// of them via lifecycle.
+//
+// The sweep is bounded to maxDeleteMarkerSweepPagesPerDeletion listing pages per call. When the budget is
+// exhausted, the resume key is persisted in an annotation on the BackupBucket and a retryable error is returned
+// so that Gardener requeues the deletion; the following attempt continues from the stored key marker.
+// Any other problem (missing credentials, S3 errors) is logged and the sweep is skipped, keeping bucket deletion
+// best effort as before.
+func (a *actuator) sweepExpiredDeleteMarkersBeforeBucketDelete(ctx context.Context, backupBucket *extensionsv1alpha1.BackupBucket, bucketObject client.Object, bucketClient *backupBucketClientConfig) error {
 	if a.clientFactory == nil {
-		return
+		return nil
 	}
 	fetched := bucketObject.DeepCopyObject().(client.Object)
 	if err := bucketClient.orgClient.Get(ctx, client.ObjectKeyFromObject(bucketObject), fetched); err != nil {
-		return
+		// Bucket already gone or not readable: nothing to sweep; bucket deletion below handles NotFound.
+		klog.V(2).Infof("Skipping expired delete marker sweep for bucket %q: %v", bucketObject.GetName(), err)
+		return nil //nolint:nilerr // the sweep is best effort
 	}
 
 	var endpoint, region, fqn string
@@ -267,28 +269,21 @@ func (a *actuator) sweepExpiredDeleteMarkersBeforeBucketDelete(ctx context.Conte
 			lifecyclePolicy = b.Spec.BucketPolicy.LifecyclePolicy
 		}
 	default:
-		return
+		return nil
 	}
 
 	if !storage.NeedsExpiredDeleteMarkerSweep(lockingPolicy, lifecyclePolicy) || endpoint == "" || region == "" || fqn == "" {
-		return
+		return nil
 	}
 	accessKeys, err := storage.GetAccessKeyAndKeyID(ctx, bucketClient.orgClient, bucketClient.serviceAccount, bucketClient.gdchConfig.OrgClusterURL)
 	if err != nil || accessKeys == nil {
 		klog.Warningf("Skipping expired delete marker sweep before deleting bucket %q: failed to retrieve access keys: %v", bucketObject.GetName(), err)
-		return
+		return nil
 	}
 	caDataBytes, err := base64.StdEncoding.DecodeString(bucketClient.gdchConfig.CAData)
 	if err != nil {
 		klog.Warningf("Skipping expired delete marker sweep before deleting bucket %q: failed to decode CA data: %v", bucketObject.GetName(), err)
-		return
-	}
-	a.sweepExpiredDeleteMarkersBestEffort(ctx, bucketObject.GetName(), fqn, endpoint, region, accessKeys, caDataBytes)
-}
-
-func (a *actuator) sweepExpiredDeleteMarkersBestEffort(ctx context.Context, bucketName, bucketFQN, endpoint, region string, accessKeys *storage.AccessKeys, caDataBytes []byte) {
-	if a.clientFactory == nil || accessKeys == nil || bucketFQN == "" || endpoint == "" || region == "" {
-		return
+		return nil
 	}
 	s3Client, err := a.clientFactory.NewS3Client(&s3.Config{
 		AccessKeyId:     string(accessKeys.AccessKeyID),
@@ -298,12 +293,86 @@ func (a *actuator) sweepExpiredDeleteMarkersBestEffort(ctx context.Context, buck
 		S3Certificate:   caDataBytes,
 	})
 	if err != nil || s3Client == nil {
-		klog.Warningf("Skipping expired delete marker sweep for bucket %q (%s): failed to initialize S3 client: %v", bucketName, bucketFQN, err)
-		return
+		klog.Warningf("Skipping expired delete marker sweep for bucket %q (%s): failed to initialize S3 client: %v", bucketObject.GetName(), fqn, err)
+		return nil
 	}
-	if err := s3Client.DeleteExpiredDeleteMarkers(ctx, bucketFQN); err != nil {
-		klog.Warningf("Failed to sweep expired delete markers for bucket %q (%s): %v", bucketName, bucketFQN, err)
+
+	keyMarker := backupBucket.Annotations[deleteMarkerSweepKeyMarkerAnnotation]
+	// Stop the sweep well before the reconciliation deadline (3m by default) so that the progress made can
+	// still be persisted and the deletion requeued instead of the whole attempt timing out without a trace.
+	sweepCtx, cancel := deleteMarkerSweepContext(ctx)
+	result, err := s3Client.DeleteExpiredDeleteMarkers(sweepCtx, fqn, s3.DeleteExpiredDeleteMarkersOptions{
+		KeyMarker: keyMarker,
+		MaxPages:  maxDeleteMarkerSweepPagesPerDeletion,
+	})
+	cancel()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		hasProgress := (result != nil && result.NextKeyMarker != "") || keyMarker != ""
+		if stderrors.Is(err, s3.ErrorS3NoSuchBucket) || (sweepCtx.Err() == nil && !hasProgress) {
+			klog.Warningf("Failed to sweep expired delete markers for bucket %q (%s): %v", bucketObject.GetName(), fqn, err)
+			return nil
+		}
+		// The sweep hit its per-reconcile time budget or was interrupted after making progress: persist any
+		// newly completed key and requeue.
+		klog.Infof("Expired delete marker sweep for bucket %q (%s) interrupted, will resume: %v", bucketObject.GetName(), fqn, err)
 	}
+	if result == nil {
+		result = &s3.DeleteExpiredDeleteMarkersResult{}
+	}
+	if result.Done() {
+		if keyMarker != "" {
+			if err := a.patchSweepKeyMarker(ctx, backupBucket, ""); err != nil {
+				return fmt.Errorf("RetryableError: failed to clear delete marker sweep progress for bucket %q: %w", backupBucket.Name, err)
+			}
+		}
+		klog.Infof("Expired delete marker sweep for bucket %q (%s) complete: removed %d markers in %d page(s)", bucketObject.GetName(), fqn, result.DeletedMarkers, result.ScannedPages)
+		return nil
+	}
+
+	resumeAfter := result.NextKeyMarker
+	if resumeAfter != "" {
+		if err := a.patchSweepKeyMarker(ctx, backupBucket, resumeAfter); err != nil {
+			return fmt.Errorf("RetryableError: failed to persist delete marker sweep progress for bucket %q: %w", backupBucket.Name, err)
+		}
+	} else {
+		resumeAfter = keyMarker
+	}
+	klog.Infof("Expired delete marker sweep for bucket %q (%s) in progress: removed %d markers in %d page(s), resuming after key %q", bucketObject.GetName(), fqn, result.DeletedMarkers, result.ScannedPages, resumeAfter)
+	// Requeue promptly: the remaining work is known and bounded, so exponential backoff would only delay it.
+	return &reconciler.RequeueAfterError{
+		RequeueAfter: deleteMarkerSweepRequeueInterval,
+		Cause: fmt.Errorf("RetryableError: expired delete marker sweep for bucket %q (%s) in progress: removed %d markers in %d page(s), resuming after key %q",
+			backupBucket.Name, fqn, result.DeletedMarkers, result.ScannedPages, resumeAfter),
+	}
+}
+
+// deleteMarkerSweepContext derives the context for one sweep pass: it ends deleteMarkerSweepReserve before the
+// parent deadline (or after deleteMarkerSweepMaxDuration when the parent has none).
+func deleteMarkerSweepContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := deleteMarkerSweepMaxDuration
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline) - deleteMarkerSweepReserve; remaining < timeout {
+			timeout = max(remaining, 0)
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// patchSweepKeyMarker sets (or removes, when empty) the sweep resume annotation on the BackupBucket.
+func (a *actuator) patchSweepKeyMarker(ctx context.Context, backupBucket *extensionsv1alpha1.BackupBucket, keyMarker string) error {
+	original := backupBucket.DeepCopy()
+	if keyMarker == "" {
+		delete(backupBucket.Annotations, deleteMarkerSweepKeyMarkerAnnotation)
+	} else {
+		if backupBucket.Annotations == nil {
+			backupBucket.Annotations = map[string]string{}
+		}
+		backupBucket.Annotations[deleteMarkerSweepKeyMarkerAnnotation] = keyMarker
+	}
+	return a.client.Patch(ctx, backupBucket, client.MergeFrom(original))
 }
 
 // getClientAndConfig is a helper function to initialize all necessary clients and configurations
@@ -344,10 +413,10 @@ func (a *actuator) updateBackupBucketAnnotations(ctx context.Context, backupBuck
 	return nil
 }
 
-func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *extensionsv1alpha1.BackupBucket, bucketEndpoint string, bucketRegion string, bucketClient *backupBucketClientConfig) (*storage.AccessKeys, []byte, error) {
+func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *extensionsv1alpha1.BackupBucket, bucketEndpoint string, bucketRegion string, bucketClient *backupBucketClientConfig) error {
 	accessKeys, err := storage.GetAccessKeyAndKeyID(ctx, bucketClient.orgClient, bucketClient.serviceAccount, bucketClient.gdchConfig.OrgClusterURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get bucket access keys: %w", err)
+		return fmt.Errorf("failed to get bucket access keys: %w", err)
 	}
 	accessKeyID := accessKeys.AccessKeyID
 	secretAccessKey := accessKeys.AccessKey
@@ -361,17 +430,17 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 
 	gdchConfigJSONData, err := json.Marshal(bucketClient.gdchConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to enode a gdch-config json: %w", err)
+		return fmt.Errorf("failed to enode a gdch-config json: %w", err)
 	}
 
 	serviceAccountJSONData, err := json.Marshal(bucketClient.serviceAccount) // #nosec G117 -- intentional serialization of service account credentials for backup secret
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to enode a service account json: %w", err)
+		return fmt.Errorf("failed to enode a service account json: %w", err)
 	}
 
 	caDataBytes, err := base64.StdEncoding.DecodeString(bucketClient.gdchConfig.CAData)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to decode CA data from gdch config: %w", err)
+		return fmt.Errorf("failed to decode CA data from gdch config: %w", err)
 	}
 	trustedCaCert := string(caDataBytes)
 
@@ -381,17 +450,17 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 	if backupBucket.Spec.ProviderConfig != nil {
 		backupBucketConfig, err := validator.DecodeBackupBucketConfig(a.decoder, backupBucket.Spec.ProviderConfig)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decode BackupBucketConfig: %w", err)
+			return fmt.Errorf("failed to decode BackupBucketConfig: %w", err)
 		}
 		if backupBucketConfig.RequestChecksumCalculation != "" {
 			if err := validateChecksumValue(backupBucketConfig.RequestChecksumCalculation); err != nil {
-				return nil, nil, fmt.Errorf("invalid RequestChecksumCalculation: %w", err)
+				return fmt.Errorf("invalid RequestChecksumCalculation: %w", err)
 			}
 			requestChecksumCalculation = backupBucketConfig.RequestChecksumCalculation
 		}
 		if backupBucketConfig.ResponseChecksumValidation != "" {
 			if err := validateChecksumValue(backupBucketConfig.ResponseChecksumValidation); err != nil {
-				return nil, nil, fmt.Errorf("invalid ResponseChecksumValidation: %w", err)
+				return fmt.Errorf("invalid ResponseChecksumValidation: %w", err)
 			}
 			responseChecksumValidation = backupBucketConfig.ResponseChecksumValidation
 		}
@@ -413,7 +482,7 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 
 	backupSecretJSONData, err := json.Marshal(backupSecretJSON)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to enode a backup json: %w", err)
+		return fmt.Errorf("failed to enode a backup json: %w", err)
 	}
 
 	// For backward compatibility: package the credentials in two formats.
@@ -440,7 +509,7 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 		backupSecret.Data = backupSecretData
 		return nil
 	}); err != nil {
-		return nil, nil, fmt.Errorf("failed to create a backup secret: %w", err)
+		return fmt.Errorf("failed to create a backup secret: %w", err)
 	}
 
 	generatedSecretReference := &corev1.SecretReference{
@@ -451,10 +520,10 @@ func (a *actuator) updateBackupBucketStatus(ctx context.Context, backupBucket *e
 	backupBucket.Status.GeneratedSecretRef = generatedSecretReference
 
 	if err := a.client.Status().Patch(ctx, backupBucket, client.MergeFrom(originalBackupBucket)); err != nil {
-		return nil, nil, fmt.Errorf("failed to patch BackupBucket Status: %w", err)
+		return fmt.Errorf("failed to patch BackupBucket Status: %w", err)
 	}
 
-	return accessKeys, caDataBytes, nil
+	return nil
 }
 
 // getLockingPolicy computes the initial object LockingPolicy to be set when creating a bucket.

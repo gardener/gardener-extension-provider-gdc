@@ -17,13 +17,19 @@ package backupbucket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 
+	v1beta1helper "github.com/gardener/gardener/pkg/api/core/v1beta1/helper"
+	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
+	"github.com/gardener/gardener/pkg/controllerutils/reconciler"
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	globalv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/global/object/v1"
@@ -1303,7 +1309,7 @@ func TestLegacyGDC1162Compatibility_FallbackAndDeleteMarkerSweep(t *testing.T) {
 		}
 	})
 
-	t.Run("backfills missing lifecyclePolicy on pre-existing locked bucket and reconciles sweeping expired delete markers", func(t *testing.T) {
+	t.Run("backfills missing lifecyclePolicy on pre-existing locked bucket without sweeping delete markers during reconcile", func(t *testing.T) {
 		existingLockedBucket := newBucket(backupBucketName, true)
 		existingLockedBucket.Spec.BucketPolicy = &objectv1.BucketPolicy{
 			LockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(1))},
@@ -1361,6 +1367,7 @@ func TestLegacyGDC1162Compatibility_FallbackAndDeleteMarkerSweep(t *testing.T) {
 			},
 		}
 
+		sweepCalls := 0
 		a := &actuator{
 			client:  gardenClient,
 			decoder: decoder,
@@ -1371,6 +1378,10 @@ func TestLegacyGDC1162Compatibility_FallbackAndDeleteMarkerSweep(t *testing.T) {
 				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
 					return s3.CreateMockS3Client(s3.MockS3ClientConfig{
 						Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: mockBucket},
+						DeleteExpiredDeleteMarkersFunc: func(context.Context, string, s3.DeleteExpiredDeleteMarkersOptions) (*s3.DeleteExpiredDeleteMarkersResult, error) {
+							sweepCalls++
+							return &s3.DeleteExpiredDeleteMarkersResult{}, nil
+						},
 					}), nil
 				},
 			},
@@ -1391,11 +1402,219 @@ func TestLegacyGDC1162Compatibility_FallbackAndDeleteMarkerSweep(t *testing.T) {
 			t.Fatalf("expected nil ExpiredObjectDeleteMarker on legacy 1.16.2, got %v", updatedBucket.Spec.BucketPolicy.LifecyclePolicy.LifecycleRules[0].ExpiredObjectDeleteMarker)
 		}
 
-		if _, exists := mockBucket.Objects["shoot-1/expired-snap"]; exists {
-			t.Errorf("expected expired delete marker key shoot-1/expired-snap to be swept during Reconcile")
+		// Reconcile must not iterate over the bucket: orphaned delete markers are only swept on deletion.
+		if sweepCalls != 0 {
+			t.Errorf("expected no delete marker sweep during Reconcile, got %d call(s)", sweepCalls)
 		}
-		if _, exists := mockBucket.Objects["shoot-1/recoverable-snap"]; !exists {
-			t.Errorf("expected recoverable key shoot-1/recoverable-snap (with noncurrent version) to be preserved")
+		if _, exists := mockBucket.Objects["shoot-1/expired-snap"]; !exists {
+			t.Errorf("expected delete marker key shoot-1/expired-snap to be left untouched during Reconcile")
+		}
+	})
+
+	t.Run("sweeps expired delete markers in bounded, resumable passes before deleting the bucket", func(t *testing.T) {
+		lockedBucket := newBucket(backupBucketName, true)
+		lockedBucket.Spec.BucketPolicy = &objectv1.BucketPolicy{
+			LockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(1))},
+			LifecyclePolicy: &objectv1.LifecyclePolicy{
+				Enable: true,
+				LifecycleRules: []*objectv1.LifecycleRule{{
+					ID:                   ptr.To(backupLifecycleRuleID),
+					Status:               ptr.To(objectv1.Enabled),
+					NoncurrentExpiration: &objectv1.LifecycleNoncurrentExpiration{NoncurrentDays: ptr.To(int64(1))},
+				}},
+			},
+		}
+		accessKeySecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        credentialSecretName,
+				Namespace:   storage.ObjectStorageAccessKeyNamespace,
+				Labels:      map[string]string{objectv1.SubjectTypeLabel: "User"},
+				Annotations: map[string]string{objectv1.SubjectAnnotation: fmt.Sprintf("system:serviceaccount:%s:%s", testProject, serviceAccountName)},
+			},
+			Data: map[string][]byte{"access-key-id": []byte(testAccessKeyID), "secret-access-key": []byte(testSecretAccessKey)},
+		}
+		credSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: credentialSecretName, Namespace: testProject},
+			Data: map[string][]byte{
+				"serviceaccount.json": []byte(fmt.Sprintf(`{"Name":%q,"project":%q}`, serviceAccountName, testProject)),
+				"gdch-config":         []byte(`{"caData":"ZmFrZS1jYWRhdGE=","orgClusterURL":"https://management-kube.apiserver.gdc1.us-west16-c.s.gpcdemolabs.com"}`),
+			},
+		}
+		bb := &extensionsv1alpha1.BackupBucket{
+			ObjectMeta: metav1.ObjectMeta{Name: backupBucketName},
+			Spec: extensionsv1alpha1.BackupBucketSpec{
+				Region:    "us-west1",
+				SecretRef: corev1.SecretReference{Name: credentialSecretName, Namespace: testProject},
+			},
+		}
+		orgClient := newTestClient(lockedBucket, accessKeySecret)
+		gardenClient := newTestClient(bb, credSecret)
+
+		// 3 expired keys + 1 recoverable key; with one key per mock "page" and a budget of 2 pages per
+		// deletion attempt, the sweep needs two attempts before the bucket may be deleted.
+		mockBucket := &s3.MockBucket{Objects: map[string]*s3.MockObject{
+			"shoot-1/expired-a":   {Versions: []*s3.MockObjectVersion{{VersionID: ptr.To("dm-a"), IsDeleteMarker: true, IsLatest: true}}},
+			"shoot-1/expired-b":   {Versions: []*s3.MockObjectVersion{{VersionID: ptr.To("dm-b"), IsDeleteMarker: true, IsLatest: true}}},
+			"shoot-1/recoverable": {Versions: []*s3.MockObjectVersion{{VersionID: ptr.To("dm-r"), IsDeleteMarker: true, IsLatest: true}, {VersionID: ptr.To("v-r"), Data: []byte("backup")}}},
+			"shoot-2/expired-c":   {Versions: []*s3.MockObjectVersion{{VersionID: ptr.To("dm-c"), IsDeleteMarker: true, IsLatest: true}}},
+		}}
+		var sweepOpts []s3.DeleteExpiredDeleteMarkersOptions
+		mock := s3.CreateMockS3Client(s3.MockS3ClientConfig{Buckets: map[string]*s3.MockBucket{fullyQualifiedBucketName: mockBucket}})
+		a := &actuator{
+			client:  gardenClient,
+			decoder: decoder,
+			clientFactory: &mockClientFactory{
+				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
+					return orgClient, nil
+				},
+				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
+					return s3.CreateMockS3Client(s3.MockS3ClientConfig{
+						DeleteExpiredDeleteMarkersFunc: func(ctx context.Context, fqn string, opts s3.DeleteExpiredDeleteMarkersOptions) (*s3.DeleteExpiredDeleteMarkersResult, error) {
+							sweepOpts = append(sweepOpts, opts)
+							opts.MaxPages = 2 // shrink the budget so the test exercises the resume path
+							return mock.DeleteExpiredDeleteMarkers(ctx, fqn, opts)
+						},
+					}), nil
+				},
+			},
+		}
+
+		// First attempt: budget exhausted -> progress persisted, retryable error, bucket NOT deleted yet.
+		err := a.Delete(context.Background(), logr.Logger{}, bb)
+		if err == nil || !strings.Contains(err.Error(), "in progress") {
+			t.Fatalf("expected in-progress error on first deletion attempt, got %v", err)
+		}
+		// Gardener's BackupBucket reconciler reports the cause of a RequeueAfterError in the status.
+		if codes := v1beta1helper.ExtractErrorCodes(reconciler.ReconcileErrCauseOrErr(err)); !slices.Contains(codes, gardencorev1beta1.ErrorRetryableInfraDependencies) {
+			t.Fatalf("expected ErrorRetryableInfraDependencies error code, got %v (%v)", codes, err)
+		}
+		var requeue *reconciler.RequeueAfterError
+		if !errors.As(err, &requeue) || requeue.RequeueAfter != deleteMarkerSweepRequeueInterval {
+			t.Fatalf("expected RequeueAfterError with %s, got %v", deleteMarkerSweepRequeueInterval, err)
+		}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, &objectv1.Bucket{}); err != nil {
+			t.Fatalf("bucket must not be deleted while the sweep is in progress: %v", err)
+		}
+		if err := gardenClient.Get(context.Background(), client.ObjectKeyFromObject(bb), bb); err != nil {
+			t.Fatal(err)
+		}
+		marker := bb.Annotations[deleteMarkerSweepKeyMarkerAnnotation]
+		if marker == "" {
+			t.Fatalf("expected resume key marker annotation after partial sweep, annotations=%v", bb.Annotations)
+		}
+		if _, exists := mockBucket.Objects["shoot-1/expired-a"]; exists {
+			t.Errorf("expected shoot-1/expired-a to be swept in the first pass")
+		}
+
+		// Second attempt: resumes from the stored marker, completes, clears the annotation, deletes the bucket.
+		if err := a.Delete(context.Background(), logr.Logger{}, bb); err != nil {
+			t.Fatalf("second deletion attempt failed: %v", err)
+		}
+		if len(sweepOpts) != 2 || sweepOpts[0].KeyMarker != "" || sweepOpts[1].KeyMarker != marker || sweepOpts[1].MaxPages != maxDeleteMarkerSweepPagesPerDeletion {
+			t.Fatalf("unexpected sweep options across attempts: %+v (marker %q)", sweepOpts, marker)
+		}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, &objectv1.Bucket{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected bucket to be deleted after the sweep completed, got %v", err)
+		}
+		if err := gardenClient.Get(context.Background(), client.ObjectKeyFromObject(bb), bb); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := bb.Annotations[deleteMarkerSweepKeyMarkerAnnotation]; ok {
+			t.Errorf("expected resume key marker annotation to be cleared after completion, annotations=%v", bb.Annotations)
+		}
+		for _, key := range []string{"shoot-1/expired-a", "shoot-1/expired-b", "shoot-2/expired-c"} {
+			if _, exists := mockBucket.Objects[key]; exists {
+				t.Errorf("expected expired delete marker key %s to be swept", key)
+			}
+		}
+		if _, exists := mockBucket.Objects["shoot-1/recoverable"]; !exists {
+			t.Errorf("expected recoverable key (with retained version) to be preserved")
+		}
+	})
+
+	t.Run("persists partial sweep progress when the sweep hits its time budget", func(t *testing.T) {
+		lockedBucket := newBucket(backupBucketName, true)
+		lockedBucket.Spec.BucketPolicy = &objectv1.BucketPolicy{
+			LockingPolicy: &objectv1.LockingPolicy{DefaultObjectRetentionDays: ptr.To(int32(1))},
+		}
+		accessKeySecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        credentialSecretName,
+				Namespace:   storage.ObjectStorageAccessKeyNamespace,
+				Labels:      map[string]string{objectv1.SubjectTypeLabel: "User"},
+				Annotations: map[string]string{objectv1.SubjectAnnotation: fmt.Sprintf("system:serviceaccount:%s:%s", testProject, serviceAccountName)},
+			},
+			Data: map[string][]byte{"access-key-id": []byte(testAccessKeyID), "secret-access-key": []byte(testSecretAccessKey)},
+		}
+		credSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: credentialSecretName, Namespace: testProject},
+			Data: map[string][]byte{
+				"serviceaccount.json": []byte(fmt.Sprintf(`{"Name":%q,"project":%q}`, serviceAccountName, testProject)),
+				"gdch-config":         []byte(`{"caData":"ZmFrZS1jYWRhdGE=","orgClusterURL":"https://management-kube.apiserver.gdc1.us-west16-c.s.gpcdemolabs.com"}`),
+			},
+		}
+		bb := &extensionsv1alpha1.BackupBucket{
+			ObjectMeta: metav1.ObjectMeta{Name: backupBucketName},
+			Spec: extensionsv1alpha1.BackupBucketSpec{
+				Region:    "us-west1",
+				SecretRef: corev1.SecretReference{Name: credentialSecretName, Namespace: testProject},
+			},
+		}
+		orgClient := newTestClient(lockedBucket, accessKeySecret)
+		gardenClient := newTestClient(bb, credSecret)
+		a := &actuator{
+			client:  gardenClient,
+			decoder: decoder,
+			clientFactory: &mockClientFactory{
+				mockGetOrgClientFn: func(_ *gdcclient.OrgClusterConfig, _ *auth.ServiceAccount, _ *runtime.Scheme) (client.Client, error) {
+					return orgClient, nil
+				},
+				mockNewS3ClientFn: func(_ *s3.Config) (s3.Client, error) {
+					return s3.CreateMockS3Client(s3.MockS3ClientConfig{
+						// Simulate a slow bucket: the sweep context expires after some progress was made.
+						DeleteExpiredDeleteMarkersFunc: func(ctx context.Context, _ string, _ s3.DeleteExpiredDeleteMarkersOptions) (*s3.DeleteExpiredDeleteMarkersResult, error) {
+							<-ctx.Done()
+							return &s3.DeleteExpiredDeleteMarkersResult{DeletedMarkers: 7, ScannedPages: 3, NextKeyMarker: "shoot-9/last-flushed"}, ctx.Err()
+						},
+					}), nil
+				},
+			},
+		}
+
+		// Reconciliation deadline just above the reserve, so the sweep gets a tiny time budget.
+		ctx, cancel := context.WithTimeout(context.Background(), deleteMarkerSweepReserve+200*time.Millisecond)
+		defer cancel()
+		err := a.Delete(ctx, logr.Logger{}, bb)
+		var requeue *reconciler.RequeueAfterError
+		if !errors.As(err, &requeue) {
+			t.Fatalf("expected RequeueAfterError after a time-budgeted partial sweep, got %v", err)
+		}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, &objectv1.Bucket{}); err != nil {
+			t.Fatalf("bucket must not be deleted while the sweep is in progress: %v", err)
+		}
+		if err := gardenClient.Get(context.Background(), client.ObjectKeyFromObject(bb), bb); err != nil {
+			t.Fatal(err)
+		}
+		if got := bb.Annotations[deleteMarkerSweepKeyMarkerAnnotation]; got != "shoot-9/last-flushed" {
+			t.Fatalf("expected persisted resume marker from the interrupted sweep, got %q", got)
+		}
+
+		// Follow-up attempt where the remaining deadline is already within the reserve (zero-progress timeout):
+		// the existing resume annotation and the bucket must both be preserved and the deletion requeued.
+		shortCtx, shortCancel := context.WithTimeout(context.Background(), deleteMarkerSweepReserve/2)
+		defer shortCancel()
+		err = a.Delete(shortCtx, logr.Logger{}, bb)
+		if !errors.As(err, &requeue) {
+			t.Fatalf("expected RequeueAfterError when time budget expires with zero new keys closed, got %v", err)
+		}
+		if err := orgClient.Get(context.Background(), client.ObjectKey{Name: backupBucketName, Namespace: testProject}, &objectv1.Bucket{}); err != nil {
+			t.Fatalf("bucket must not be deleted on a zero-progress time-budget timeout: %v", err)
+		}
+		if err := gardenClient.Get(context.Background(), client.ObjectKeyFromObject(bb), bb); err != nil {
+			t.Fatal(err)
+		}
+		if got := bb.Annotations[deleteMarkerSweepKeyMarkerAnnotation]; got != "shoot-9/last-flushed" {
+			t.Fatalf("expected existing resume marker to be preserved across zero-progress timeout, got %q", got)
 		}
 	})
 }
