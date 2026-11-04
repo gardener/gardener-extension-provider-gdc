@@ -29,7 +29,6 @@ import (
 	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	"github.com/go-logr/logr"
-	objectv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/object/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -52,8 +51,6 @@ type bucketMetadata struct {
 	Endpoint           string
 	Region             string
 	FullyQualifiedName string
-	LockingPolicy      *objectv1.LockingPolicy
-	LifecyclePolicy    *objectv1.LifecyclePolicy
 }
 
 type storageClient struct {
@@ -170,11 +167,6 @@ func (a *actuator) deleteObjectsWithPrefix(ctx context.Context, log logr.Logger,
 		}
 		return fmt.Errorf("failed to delete S3 objects with prefix %q in bucket %s: %w", prefix, bucketName, err)
 	}
-	if storage.NeedsExpiredDeleteMarkerSweep(bucketStorageClient.bucket.LockingPolicy, bucketStorageClient.bucket.LifecyclePolicy) {
-		if err := bucketStorageClient.s3Client.DeleteExpiredDeleteMarkers(ctx, bucketFQN); err != nil {
-			log.Error(err, "Failed to sweep expired delete markers after deleting prefix", "bucket", bucketFQN, "prefix", prefix)
-		}
-	}
 	log.Info("S3 objects deleted; BackupEntry status and finalizer cleanup pending", "bucket", bucketFQN, "prefix", prefix)
 	return nil
 }
@@ -236,16 +228,10 @@ func (a *actuator) getBucketMetadata(ctx context.Context, bucketObjectKey client
 		if err != nil {
 			return nil, fmt.Errorf("failed to get object storage for dual zone bucket %s with namespace %s: %w", bucketObjectKey.Name, bucketObjectKey.Namespace, err)
 		}
-		meta := &bucketMetadata{
+		return &bucketMetadata{
 			Endpoint:           dualZoneBucket.Status.GlobalEndpoint,
 			Region:             dualZoneBucket.Status.Region,
-			FullyQualifiedName: dualZoneBucket.Status.FullyQualifiedName,
-		}
-		if dualZoneBucket.Spec.BucketPolicy != nil {
-			meta.LockingPolicy = dualZoneBucket.Spec.BucketPolicy.LockingPolicy
-			meta.LifecyclePolicy = dualZoneBucket.Spec.BucketPolicy.LifecyclePolicy
-		}
-		return meta, nil
+			FullyQualifiedName: dualZoneBucket.Status.FullyQualifiedName}, nil
 	}
 
 	// Zonal bucket use case
@@ -253,14 +239,8 @@ func (a *actuator) getBucketMetadata(ctx context.Context, bucketObjectKey client
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object storage for zonal bucket %s with namespace %s: %w", bucketObjectKey.Name, bucketObjectKey.Namespace, err)
 	}
-	meta := &bucketMetadata{
+	return &bucketMetadata{
 		Endpoint:           zonalBucket.Status.Endpoint,
 		Region:             zonalBucket.Status.Region,
-		FullyQualifiedName: zonalBucket.Status.FullyQualifiedName,
-	}
-	if zonalBucket.Spec.BucketPolicy != nil {
-		meta.LockingPolicy = zonalBucket.Spec.BucketPolicy.LockingPolicy
-		meta.LifecyclePolicy = zonalBucket.Spec.BucketPolicy.LifecyclePolicy
-	}
-	return meta, nil
+		FullyQualifiedName: zonalBucket.Status.FullyQualifiedName}, nil
 }
