@@ -8,7 +8,7 @@ labels:
   - name: cloud.gardener.cnudie/responsibles
     value:
       - type: githubTeam
-        teamname: gardener/gardener-extension-provider-gdc-maintainers
+        teamname: gardener/gdc-maintainers
         github_hostname: github.com
 
 main-source:
