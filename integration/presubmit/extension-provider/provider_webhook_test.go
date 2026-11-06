@@ -528,7 +528,7 @@ ExecStart=/opt/bin/kubelet --config=/var/lib/kubelet/config/kubelet`),
 			Files: []extensionsv1alpha1.File{
 				{
 					Path:        "/var/lib/kubelet/config/kubelet",
-					Permissions: ptr.To(uint32(0644)),
+					Permissions: ptr.To(int32(0644)),
 					Content: extensionsv1alpha1.FileContent{
 						Inline: &extensionsv1alpha1.FileContentInline{
 							Encoding: "b64",
