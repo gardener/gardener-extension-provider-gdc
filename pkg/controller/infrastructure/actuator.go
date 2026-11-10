@@ -642,8 +642,7 @@ func ReconcileZonalSubnet(
 			Namespace: &namespace,
 		},
 		NetworkSpec: &ipamv1.NetworkSpec{
-			// essential flag for usage by VMs
-			// Referece: https://docs.google.com/document/d/1xCj3mGEn_zx_9985sQEZHj4-zh8roIhJDLHEioFxvrI
+			// Essential flag for usage by VMs.
 			EnableGateway: true,
 		},
 	}

@@ -58,11 +58,11 @@ clean:
 .PHONY: generate
 generate:
 	@echo "Generating DeepCopy code..."
-	@go tool controller-gen object paths="./pkg/apis/config/...;./pkg/apis/gdc/..."
+	@go tool controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./pkg/apis/config/...;./pkg/apis/gdc/..."
 	@echo "Generating Defaulter code..."
-	@go tool defaulter-gen --output-file "zz_generated.defaults.go" ./pkg/apis/config/v1alpha1 ./pkg/apis/gdc/v1alpha1
+	@go tool defaulter-gen --go-header-file="hack/boilerplate.go.txt" --output-file "zz_generated.defaults.go" ./pkg/apis/config/v1alpha1 ./pkg/apis/gdc/v1alpha1
 	@echo "Generating Conversion code..."
-	@go tool conversion-gen --output-file "zz_generated.conversion.go" ./pkg/apis/config/v1alpha1 ./pkg/apis/gdc/v1alpha1
+	@go tool conversion-gen --go-header-file="hack/boilerplate.go.txt" --output-file "zz_generated.conversion.go" ./pkg/apis/config/v1alpha1 ./pkg/apis/gdc/v1alpha1
 
 .PHONY: check
 check: generate format $(GOLANGCI_LINT)
