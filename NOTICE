@@ -1,0 +1,28 @@
+Google Distributed Cloud (GDC) Provider Extension for Gardener
+Copyright 2025-2026 Google LLC
+
+This product includes software developed at
+Google LLC (https://www.google.com/).
+
+-------------------------------------------------------------------------------
+Third-Party Software Notices and Attributions
+-------------------------------------------------------------------------------
+
+1. Gardener and Gardener Extension Provider GCP
+   https://github.com/gardener/gardener
+   https://github.com/gardener/gardener-extension-provider-gcp
+   Copyright SAP SE or an SAP affiliate company and Gardener contributors
+   Licensed under the Apache License, Version 2.0.
+
+   Portions of the extension controller scaffolding, admission webhook structure,
+   and internal Helm chart templates in this repository are derived or adapted
+   from the Gardener project and gardener-extension-provider-gcp.
+
+2. Kubernetes CSI External Snapshotter CRDs
+   https://github.com/kubernetes-csi/external-snapshotter
+   Copyright The Kubernetes Authors
+   Licensed under the Apache License, Version 2.0.
+
+   The VolumeSnapshot CustomResourceDefinition templates under
+   charts/internal/shoot-crds/charts/volumesnapshots/templates/ are derived from
+   the Kubernetes CSI external-snapshotter project.
