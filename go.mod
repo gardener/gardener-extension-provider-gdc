@@ -17,7 +17,7 @@ require (
 	github.com/spf13/pflag v1.1.0
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
@@ -51,7 +51,7 @@ require (
 	github.com/gardener/machine-controller-manager v0.63.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/googlecloudplatform/google-distributed-cloud-apis v0.0.0-20260824201624-0c18fa0ddc04
-	helm.sh/helm/v4 v4.3.1
+	helm.sh/helm/v4 v4.3.2
 	k8s.io/autoscaler/vertical-pod-autoscaler v1.7.3
 	k8s.io/cli-runtime v0.37.2
 	k8s.io/kubelet v0.37.2
@@ -172,7 +172,7 @@ require (
 	github.com/jmoiron/sqlx v1.4.0 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.13-0.20220915233716-71ac16282d12 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/kubernetes-csi/external-snapshotter/client/v4 v4.2.0 // indirect
 	github.com/labstack/echo/v4 v4.16.1 // indirect
 	github.com/labstack/gommon v0.5.0 // indirect
@@ -277,7 +277,7 @@ require (
 	k8s.io/gengo/v2 v2.0.0-20260408192533-25e2208e0dc3 // indirect
 	k8s.io/kube-aggregator v0.37.2 // indirect
 	k8s.io/kube-openapi v0.29.0 // indirect
-	k8s.io/kubectl v0.37.1 // indirect
+	k8s.io/kubectl v0.37.2 // indirect
 	k8s.io/pod-security-admission v0.37.2 // indirect
 	k8s.io/streaming v0.37.2 // indirect
 	oras.land/oras-go/v2 v2.6.2 // indirect
