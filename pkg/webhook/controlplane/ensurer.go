@@ -271,7 +271,6 @@ func (e *ensurer) EnsureKubeletConfiguration(_ context.Context, _ gcontext.Garde
 }
 
 // EnsureETCD ensures that the etcd stateful sets conform to the provider requirements.
-// For internal context, see: go/gardener-etcd-webhook
 func (e *ensurer) EnsureETCD(ctx context.Context, _ gcontext.GardenContext, newObj, oldObj *druidv1alpha1.Etcd) error {
 	if newObj.Name == v1beta1constants.ETCDMain {
 		// Ensure that the etcd storage is configured correctly.
