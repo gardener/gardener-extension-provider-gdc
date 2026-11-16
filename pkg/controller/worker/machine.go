@@ -77,7 +77,7 @@ func createDiskSpec(size string, boot bool, machineImage, project, diskType *str
 		Type:       ptr.Deref(diskType, ""),
 	}
 
-	// TODO(b/458401774): Remove this logic when SAP has fully migrated away from pd-standard
+	// TODO(b/458401774): Remove this logic after migrating away from pd-standard
 	if disk.Type == "pd-standard" {
 		disk.Type = "Standard"
 	}

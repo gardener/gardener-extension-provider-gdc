@@ -205,7 +205,6 @@ func (f *backupTestFixture) testDualZoneBackupBucketCreation(t *testing.T, ctx c
 				ProviderConfig: &runtime.RawExtension{
 					Raw: encode(t, &v1alpha1.BackupBucketConfig{
 						// Assume an existing BackupLocation
-						// See: go/extension-provider-integration-test
 						TypeMeta: metav1.TypeMeta{
 							Kind:       "BackupBucketConfig",
 							APIVersion: "gdch.provider.extensions.gardener.gdc.goog/v1alpha1",

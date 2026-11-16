@@ -47,7 +47,7 @@ func ValidateInfrastructureConfigUpdate(oldConfig, newConfig *gdc.Infrastructure
 		allErrs = append(allErrs, field.Invalid(nodeCidrFieldPath, newNodeCIDRVal, "nodeCIDR is immutable"))
 	}
 
-	// TODO(b/500429651): delete the validation of updating parentSubnet to parentReference after SAP has fully migrated to use parentReference
+	// TODO(b/500429651): delete the validation of updating parentSubnet to parentReference after migrating to use parentReference
 	oldParentPool := oldConfig.Networks.ParentSubnet
 	newParentPool := newConfig.Networks.ParentSubnet
 	parentFieldPath := networksPath.Child("parentSubnet")
