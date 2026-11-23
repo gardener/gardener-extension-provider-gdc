@@ -15,10 +15,18 @@
 package worker
 
 import (
+	"bytes"
+	"encoding/base64"
+	"io"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/gardener/gardener/pkg/chartrenderer"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/apimachinery/pkg/version"
 
 	"github.com/gardener/gardener-extension-provider-gdc/charts"
 )
@@ -79,5 +87,85 @@ func TestMachineClassHelmDrift(t *testing.T) {
 		t.Errorf("Please ensure machine_class.go is updated to match Helm template.")
 	} else {
 		t.Logf("All %d fields used in Helm template are supported by machine_class.go", len(usedFields))
+	}
+}
+
+// Exercise the actual renderer and YAML document decoder, including payloads
+// that absorb the template's trailing fields into a second MachineClass.
+func TestMachineClassScalarQuoting(t *testing.T) {
+	renderer := chartrenderer.NewWithServerVersion(&version.Info{GitVersion: "v1.35.0", Major: "1", Minor: "35"})
+	for _, value := range []string{
+		"tenant-project", "true", "123", "null", "", "value: injected", "quote\" and 'apostrophe'", "tab\tvalue",
+		"project\n---\napiVersion: machine.sapcloud.io/v1alpha1\nkind: MachineClass\nmetadata:\n  name: injected\nproviderSpec:",
+	} {
+		t.Run(value, func(t *testing.T) {
+			values := map[string]interface{}{"machineClasses": []map[string]interface{}{{
+				"name": value, "project": value, "addressPoolName": value, "subnetName": value,
+				"orgClusterURL": value, "registryURL": value, "caData": value, "machineType": value,
+				"enableEgress": true,
+				"nodeTemplate": map[string]interface{}{"capacity": map[string]string{"cpu": "2"}, "instanceType": value, "region": value, "zone": value},
+				"disks":        []map[string]interface{}{{"image": value, "project": value, "sizeGb": 20, "boot": true}},
+				"labels":       map[string]string{"test": value}, "annotations": map[string]string{"test": value},
+				"resourceLabels":       map[string]string{"test": value},
+				"secret":               map[string]string{"cloudConfig": value},
+				"credentialsSecretRef": map[string]string{"name": value, "namespace": value},
+			}}}
+			rendered, err := renderer.RenderEmbeddedFS(charts.InternalChart, "internal/machineclass", "test", value, values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(rendered.Manifest()), 4096)
+			objects := map[string]map[string]interface{}{}
+			count := 0
+			for {
+				var obj map[string]interface{}
+				err := decoder.Decode(&obj)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(obj) == 0 {
+					continue
+				}
+				count++
+				kind, _ := obj["kind"].(string)
+				objects[kind] = obj
+			}
+			if count != 2 || objects["Secret"] == nil || objects["MachineClass"] == nil {
+				t.Fatalf("expected exactly one Secret and one MachineClass, got %d documents", count)
+			}
+			assertString := func(obj map[string]interface{}, want string, path ...string) {
+				t.Helper()
+				got, found, err := unstructured.NestedString(obj, path...)
+				if err != nil || !found || got != want {
+					t.Errorf("%v = %q, found = %v, error = %v; want %q", path, got, found, err, want)
+				}
+			}
+			for _, obj := range objects {
+				assertString(obj, value, "metadata", "name")
+				assertString(obj, value, "metadata", "namespace")
+			}
+			mc := objects["MachineClass"]
+			for _, name := range []string{"project", "addressPoolName", "subnetName", "orgClusterURL", "registryURL", "caData", "machineType"} {
+				assertString(mc, value, "providerSpec", name)
+			}
+			for _, name := range []string{"instanceType", "region", "zone"} {
+				assertString(mc, value, "nodeTemplate", name)
+			}
+			for _, ref := range []string{"secretRef", "credentialsSecretRef"} {
+				for _, name := range []string{"name", "namespace"} {
+					assertString(mc, value, ref, name)
+				}
+			}
+			assertString(mc, value, "providerSpec", "labels", "test")
+			assertString(objects["Secret"], value, "metadata", "labels", "test")
+			assertString(objects["Secret"], base64.StdEncoding.EncodeToString([]byte(value)), "data", "userData")
+			egress, found, err := unstructured.NestedBool(mc, "providerSpec", "enableEgress")
+			if err != nil || !found || !egress {
+				t.Fatalf("enableEgress must remain a boolean: %v", err)
+			}
+		})
 	}
 }

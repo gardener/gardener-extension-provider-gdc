@@ -17,11 +17,15 @@ package gdc
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode"
 
 	extensionscontroller "github.com/gardener/gardener/extensions/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gardener/gardener-extension-provider-gdc/gdc/pkg/auth"
@@ -76,7 +80,13 @@ func getGDCHConfigFromSecret(secret *corev1.Secret) (*gdcclient.OrgClusterConfig
 	return config, nil
 }
 
-// getServiceAccountFromJSON returns a ServiceAccount from the given
+// GetServiceAccountFromJSON decodes and validates service account credentials.
+// Admission and runtime consumers use the same validation boundary.
+func GetServiceAccountFromJSON(data []byte) (*auth.ServiceAccount, error) {
+	return getServiceAccountFromJSON(data)
+}
+
+// getServiceAccountFromJSON returns a validated ServiceAccount from the given JSON.
 func getServiceAccountFromJSON(data []byte) (*auth.ServiceAccount, error) {
 	serviceAccount := &auth.ServiceAccount{}
 	if err := json.Unmarshal(data, serviceAccount); err != nil {
@@ -84,6 +94,35 @@ func getServiceAccountFromJSON(data []byte) (*auth.ServiceAccount, error) {
 	}
 	if serviceAccount.Project == "" {
 		return nil, fmt.Errorf("no project specified for service account")
+	}
+	if errs := validation.IsDNS1123Label(serviceAccount.Project); len(errs) > 0 {
+		return nil, fmt.Errorf("service account project must be a DNS-1123 label: %s", strings.Join(errs, "; "))
+	}
+
+	// Check every string, including extension fields, without including credential
+	// values in errors. PEM keys need their standard spaces and line breaks.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for name, raw := range fields {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			continue // Non-string extension fields are not interpolated.
+		}
+		if strings.ContainsAny(value, "\"'") {
+			return nil, fmt.Errorf("service account field %q must not contain quotes", name)
+		}
+		if strings.ContainsFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			if name == "private_key" {
+				block, rest := pem.Decode([]byte(value))
+				if block != nil && (block.Type == "PRIVATE KEY" || block.Type == "RSA PRIVATE KEY" || block.Type == "EC PRIVATE KEY") &&
+					len(block.Headers) == 0 && strings.HasPrefix(value, "-----BEGIN "+block.Type+"-----") && len(strings.TrimSpace(string(rest))) == 0 {
+					continue
+				}
+			}
+			return nil, fmt.Errorf("service account field %q must not contain whitespace or control characters (except PEM private key formatting)", name)
+		}
 	}
 
 	return serviceAccount, nil
