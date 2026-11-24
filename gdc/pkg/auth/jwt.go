@@ -86,7 +86,7 @@ func signJWTWithKey(kid, key, sub, issuer, audience string) (string, error) {
 		Issuer:    issuer,
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audience},
-		NotBefore: jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
 		ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 		IssuedAt:  jwt.NewNumericDate(now),
 	}
