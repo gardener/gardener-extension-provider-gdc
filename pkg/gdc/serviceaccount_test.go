@@ -16,6 +16,7 @@ package gdc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -257,4 +258,76 @@ func TestGetGDCHConfigFromSecretReferenceErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestServiceAccountProjectValidation(t *testing.T) {
+	for _, tt := range []struct {
+		project string
+		valid   bool
+	}{
+		{"project", true}, {"a", true}, {"project-123", true}, {strings.Repeat("a", 63), true},
+		{"", false}, {strings.Repeat("a", 64), false}, {"Project", false}, {"project.name", false},
+		{"project_name", false}, {"-project", false}, {"project-", false}, {"project name", false},
+		{"project\tname", false}, {"project\rname", false}, {"project\u00a0name", false},
+		{"project'", false}, {"project\"", false},
+		{"project\n---\napiVersion: machine.sapcloud.io/v1alpha1\nkind: MachineClass\nmetadata:\n  name: injected\nproviderSpec:", false},
+	} {
+		t.Run(fmt.Sprintf("%q", tt.project), func(t *testing.T) {
+			data, err := json.Marshal(map[string]string{"project": tt.project})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = getServiceAccountFromJSON(data)
+			if (err == nil) != tt.valid {
+				t.Fatalf("valid = %v, error = %v", tt.valid, err)
+			}
+			// Verify that callers using Secret references cannot bypass validation.
+			credentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "test"},
+				Data: map[string][]byte{gdcconstants.ServiceAccountJSONField: data}}
+			c := fake.NewClientBuilder().WithObjects(credentials).Build()
+			_, err = GetServiceAccountFromSecretReference(context.Background(), c, corev1.SecretReference{Name: credentials.Name, Namespace: credentials.Namespace})
+			if (err == nil) != tt.valid {
+				t.Fatalf("Secret reference valid = %v, error = %v", tt.valid, err)
+			}
+		})
+	}
+}
+
+func TestServiceAccountStringValidation(t *testing.T) {
+	for _, name := range []string{"name", "token_uri", "private_key_id", "private_key", "extension"} {
+		for _, value := range []string{"interior whitespace", "newline\ninjection", "tab\tinjection", "quote'", "quote\"", "control\x00", "unicode\u00a0space"} {
+			t.Run(name+"/"+fmt.Sprintf("%q", value), func(t *testing.T) {
+				data, err := json.Marshal(map[string]string{"project": "project", name: value})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := getServiceAccountFromJSON(data); err == nil {
+					t.Fatal("expected rejection")
+				}
+			})
+		}
+	}
+	t.Run("PEM formatting", func(t *testing.T) {
+		key := "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----\n"
+		data, err := json.Marshal(map[string]string{"project": "project", "private_key": key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		account, err := getServiceAccountFromJSON(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if account.PrivateKey != key {
+			t.Fatal("PEM key changed")
+		}
+	})
+	t.Run("PEM trailing injection", func(t *testing.T) {
+		data, err := json.Marshal(map[string]string{"project": "project", "private_key": "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----\n---\nkind: Secret"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := getServiceAccountFromJSON(data); err == nil {
+			t.Fatal("expected rejection")
+		}
+	})
 }
