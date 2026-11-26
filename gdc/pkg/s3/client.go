@@ -106,15 +106,19 @@ func NewGDCHS3Client(config *Config) (Client, error) {
 	if config.CustomHttpClient == nil {
 		tr := &http.Transport{}
 		caCertPool := x509.NewCertPool()
-		if config.S3Certificate == nil {
+		if len(config.S3Certificate) == 0 {
 			var err error
 			caCertPool, err = x509.SystemCertPool()
 			if err != nil {
 				return nil, fmt.Errorf("certificate pool was empty and failed to fall back to system cert pool")
 			}
+		} else if !caCertPool.AppendCertsFromPEM(config.S3Certificate) {
+			return nil, fmt.Errorf("failed to parse S3 CA certificate PEM")
 		}
-		caCertPool.AppendCertsFromPEM(config.S3Certificate)
-		tr.TLSClientConfig = &tls.Config{RootCAs: caCertPool}
+		tr.TLSClientConfig = &tls.Config{
+			RootCAs:    caCertPool,
+			MinVersion: tls.VersionTLS12,
+		}
 		config.CustomHttpClient = &http.Client{
 			Transport: tr,
 			Timeout:   defaultS3TimeoutInSeconds * time.Second,

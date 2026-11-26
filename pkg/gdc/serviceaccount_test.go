@@ -331,3 +331,37 @@ func TestServiceAccountStringValidation(t *testing.T) {
 		}
 	})
 }
+
+func TestServiceAccountTokenURIValidation(t *testing.T) {
+	for _, tt := range []struct {
+		tokenURI string
+		valid    bool
+	}{
+		{"https://sts.org.example.com/v1/token", true},
+		{"https://sts.org.example.com:8443/v1/token", true},
+		{"https://10.200.0.10:443/v1/token", true},
+		{"http://sts.org.example.com/v1/token", false},
+		{"file:///etc/passwd", false},
+		{"https://localhost/v1/token", false},
+		{"https://sub.localhost:8443/v1/token", false},
+		{"https://127.0.0.1/v1/token", false},
+		{"https://[::1]:8443/v1/token", false},
+		{"https://169.254.169.254/latest/meta-data", false},
+		{"https://[fe80::1]/v1/token", false},
+		{"https://0.0.0.0/v1/token", false},
+		{"https://user:pass@sts.org.example.com/v1/token", false},
+		{"https://sts.org.example.com/v1/token#frag", false},
+		{"https:///v1/token", false},
+	} {
+		t.Run(tt.tokenURI, func(t *testing.T) {
+			data, err := json.Marshal(map[string]string{"project": "project", "token_uri": tt.tokenURI})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = getServiceAccountFromJSON(data)
+			if (err == nil) != tt.valid {
+				t.Fatalf("tokenURI %q: valid = %v, got err = %v", tt.tokenURI, tt.valid, err)
+			}
+		})
+	}
+}

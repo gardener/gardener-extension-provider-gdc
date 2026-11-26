@@ -593,6 +593,87 @@ func Test_ShootValidatorError(t *testing.T) {
 			}),
 		},
 		{
+			name: "new shoot overlaps with a shoot in another namespace without naming it",
+			withObjects: []client.Object{
+				&gardencorev1beta1.CloudProfile{
+					TypeMeta: metav1.TypeMeta{},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "fake-cloud-profile",
+					},
+					Spec: gardencorev1beta1.CloudProfileSpec{
+						Regions: []gardencorev1beta1.Region{{
+							Zones: []gardencorev1beta1.AvailabilityZone{{Name: "gdch-zone"}},
+						}},
+						ProviderConfig: &runtime.RawExtension{
+							Raw: encode(createCloudProfileConfig()),
+						},
+					},
+				},
+				&gardencorev1beta1.Shoot{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-shoot",
+						Namespace: "garden-other-project",
+					},
+					Spec: gardencorev1beta1.ShootSpec{
+						CloudProfile: &gardencorev1beta1.CloudProfileReference{
+							Name: cloudProfileNameValue,
+						},
+						Provider: gardencorev1beta1.Provider{
+							InfrastructureConfig: &runtime.RawExtension{
+								Raw: encode(&v1alpha1.InfrastructureConfig{
+									TypeMeta: metav1.TypeMeta{
+										Kind:       "InfrastructureConfig",
+										APIVersion: gdc.SchemeGroupVersion.String(),
+									},
+									Networks: v1alpha1.NetworkConfig{
+										NodeCIDR:     "10.0.0.0/24",
+										ParentSubnet: "test-ip-pool",
+									},
+								}),
+							},
+						},
+					},
+				},
+			},
+			newObj: &core.Shoot{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "new-shoot",
+					Namespace: "garden-my-project",
+				},
+				Spec: core.ShootSpec{
+					CloudProfile: &core.CloudProfileReference{
+						Name: cloudProfileNameValue,
+					},
+					Region: "gdch-zone",
+					Networking: &core.Networking{
+						Nodes: stringPtr("10.0.0.0/16"),
+					},
+					Provider: core.Provider{
+						InfrastructureConfig: &runtime.RawExtension{
+							Raw: encode(&v1alpha1.InfrastructureConfig{
+								TypeMeta: metav1.TypeMeta{
+									Kind:       "InfrastructureConfig",
+									APIVersion: gdc.SchemeGroupVersion.String(),
+								},
+								Networks: v1alpha1.NetworkConfig{
+									NodeCIDR:     "10.0.0.0/24",
+									ParentSubnet: "test-parent-subnet",
+									Zones:        []v1alpha1.Zone{{Name: "gdch-zone", CIDR: "10.0.0.0/25"}},
+								},
+							}),
+						},
+						Workers: []core.Worker{validWorkerLancer},
+					},
+				},
+			},
+			wantList: utilerrors.NewAggregate([]error{field.Invalid(
+				infrastructureConfigPath.Child("nodecidr"),
+				"10.0.0.0/24",
+				"NodeCIDR \"10.0.0.0/24\" overlaps with the nodeCIDR of another shoot using the same cloud profile",
+			),
+			}),
+		},
+		{
 			name: "unable to find cloud profile",
 			newObj: &core.Shoot{
 				Spec: core.ShootSpec{

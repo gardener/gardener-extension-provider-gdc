@@ -495,6 +495,12 @@ func reconcileRootSubnet(
 			}
 		}
 
+		// A subnet without an IPv4 request or parent reference was not created by this controller.
+		// Refuse to compare or replace it instead of dereferencing nil fields.
+		if curSubnet.Spec.IPv4Request == nil || curSubnet.Spec.ParentReference == nil {
+			return nil, fmt.Errorf("terminal error: root subnet %q already exists without an IPv4 request or parent reference and was not created for this shoot", curSubnet.Name)
+		}
+
 		cidrChanged := !ptrutil.Equal(desiredSubnet.Spec.IPv4Request.CIDR, curSubnet.Spec.IPv4Request.CIDR)
 		parentNameChanged := desiredSubnet.Spec.ParentReference.Name != curSubnet.Spec.ParentReference.Name
 		parentNamespaceChanged := !ptrutil.Equal(desiredSubnet.Spec.ParentReference.Namespace, curSubnet.Spec.ParentReference.Namespace)
@@ -557,6 +563,11 @@ func reconcileGlobalSubnet(
 			return nil, err
 		}
 	} else {
+		// A subnet without an IPv4 request or parent reference was not created by this controller.
+		// Refuse to compare or replace it instead of dereferencing nil fields.
+		if curSubnet.Spec.IPv4Request == nil || curSubnet.Spec.ParentReference == nil {
+			return nil, fmt.Errorf("terminal error: zone subnet %q already exists without an IPv4 request or parent reference and was not created for this shoot", curSubnet.Name)
+		}
 		if !ptrutil.Equal(curSubnet.Spec.IPv4Request.CIDR, &subnetCIDR) || curSubnet.Spec.ParentReference.Name != infrastructure.Name {
 			zonalSubnet := "z-" + infrastructure.Name + "-" + *propagationZone
 			err = deleteZonalSubnet(ctx, zonalKubeClients[*propagationZone], serviceAccount.Project, zonalSubnet)

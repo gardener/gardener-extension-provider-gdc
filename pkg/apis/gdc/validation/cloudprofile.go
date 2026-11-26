@@ -15,9 +15,12 @@
 package validation
 
 import (
+	"bytes"
+	"encoding/pem"
 	"fmt"
-
 	"slices"
+	"strings"
+	"unicode"
 
 	"github.com/gardener/gardener/pkg/api/core/helper"
 	"github.com/gardener/gardener/pkg/apis/core"
@@ -49,6 +52,8 @@ func validateVersions(versionsConfig []apisgdc.MachineImageVersion, versions []c
 			if version.Version == versionConfig.Version {
 				if len(versionConfig.Image) == 0 {
 					allErrs = append(allErrs, field.Required(jdxPath.Child("image"), "must provide an image"))
+				} else {
+					allErrs = append(allErrs, validateSafeScalar(versionConfig.Image, jdxPath.Child("image"))...)
 				}
 				if !slices.Contains(v1beta1constants.ValidArchitectures, *versionConfig.Architecture) {
 					allErrs = append(allErrs, field.NotSupported(jdxPath.Child("architecture"), *versionConfig.Architecture, v1beta1constants.ValidArchitectures))
@@ -92,6 +97,10 @@ func ValidateOrgConfig(cpConfig *apisgdc.CloudProfileConfig, orgFieldsPath *fiel
 		return allErrs
 	}
 
+	if cpConfig.OrgConfig.GlobalManagementAPI != "" {
+		allErrs = append(allErrs, validateSafeScalar(cpConfig.OrgConfig.GlobalManagementAPI, orgFieldsPath.Child("globalManagementAPI"))...)
+	}
+
 	zonesPath := orgFieldsPath.Child("zones")
 	if len(cpConfig.OrgConfig.Zones) == 0 {
 		allErrs = append(allErrs, field.Required(zonesPath, "At least one zone must be specified"))
@@ -128,22 +137,70 @@ func validateZoneEndpoints(zone *apisgdc.ZoneEndpoints, allowedRegions map[strin
 			zonePath.Child("managementAPI"),
 			"managementAPI must be specified for this zone entry",
 		))
+	} else {
+		allErrs = append(allErrs, validateSafeScalar(zone.ManagementAPI, zonePath.Child("managementAPI"))...)
 	}
 	if zone.InfrastructureAPI == "" {
 		allErrs = append(allErrs, field.Required(
 			zonePath.Child("infrastructureAPI"),
 			"infrastructureAPI must be specified for this zone entry",
 		))
+	} else {
+		allErrs = append(allErrs, validateSafeScalar(zone.InfrastructureAPI, zonePath.Child("infrastructureAPI"))...)
 	}
 
 	return allErrs
 }
 
-// validateRegistryConfig validates the CAData/RegistryURL dependency.
+// validateRegistryConfig validates the CAData/RegistryURL dependency and prevents TOML/YAML/INI injection.
 func validateRegistryConfig(orgConfig *apisgdc.OrgConfig, orgFieldsPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if orgConfig.RegistryURL != "" && orgConfig.CAData == "" {
-		allErrs = append(allErrs, field.Required(orgFieldsPath.Child("caData"), "caData must be specified when registryURL is set"))
+	if orgConfig.RegistryURL != "" {
+		allErrs = append(allErrs, validateSafeScalar(orgConfig.RegistryURL, orgFieldsPath.Child("registryURL"))...)
+		if orgConfig.CAData == "" {
+			allErrs = append(allErrs, field.Required(orgFieldsPath.Child("caData"), "caData must be specified when registryURL is set"))
+		}
+	}
+	if orgConfig.CAData != "" {
+		allErrs = append(allErrs, validateSafeCAData(orgConfig.CAData, orgFieldsPath.Child("caData"))...)
+	}
+	return allErrs
+}
+
+func validateSafeScalar(value string, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if strings.ContainsAny(value, "\"'") {
+		allErrs = append(allErrs, field.Invalid(fldPath, value, "must not contain quotes"))
+	}
+	if strings.ContainsFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		allErrs = append(allErrs, field.Invalid(fldPath, value, "must not contain whitespace or control characters"))
+	}
+	return allErrs
+}
+
+func validateSafeCAData(value string, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if strings.ContainsAny(value, "\"'") {
+		allErrs = append(allErrs, field.Invalid(fldPath, value, "must not contain quotes"))
+		return allErrs
+	}
+	if !strings.ContainsFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return allErrs
+	}
+	// Also permit well-formed PEM CERTIFICATE bundles without headers or trailing content.
+	rest := []byte(value)
+	parsedBlocks := 0
+	for len(bytes.TrimSpace(rest)) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) > 0 {
+			allErrs = append(allErrs, field.Invalid(fldPath, "(hidden)", "must be single-line base64 CA data or valid PEM CERTIFICATE blocks without whitespace/control injection"))
+			return allErrs
+		}
+		parsedBlocks++
+	}
+	if parsedBlocks == 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath, "(hidden)", "must not contain whitespace or control characters"))
 	}
 	return allErrs
 }

@@ -130,13 +130,13 @@ resource "local_file" "key_json" {
     type           = "gdch_service_account"
   })
   filename        = var.key-json-file
-  file_permission = 644
+  file_permission = "0600"
 }
 
 resource "local_file" "kubeconfig" {
   depends_on      = [local_file.key_json]
   filename        = var.output-kubeconfig-file
-  file_permission = 644
+  file_permission = "0600"
   content         = <<-EOF
 apiVersion: v1
 kind: Config

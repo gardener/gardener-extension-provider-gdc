@@ -749,6 +749,29 @@ func TestActuator_ZonalBucket_Delete(t *testing.T) {
 			t.Errorf("expected generated secret to be deleted from seed cluster, but it was not. err: %v", err)
 		}
 	})
+
+	t.Run("should delete the generated secret when the referenced secret is gone", func(t *testing.T) {
+		secretName := getGeneratedSecretName(backupBucketName)
+		generatedSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: generatedSecretNamespace},
+		}
+		// The referenced credential secret is intentionally missing.
+		testClient := newTestClient(backupBucket, generatedSecret)
+		a := &actuator{
+			client:        testClient,
+			clientFactory: &mockClientFactory{},
+			decoder:       serializer.NewCodecFactory(getRuntimeScheme(), serializer.EnableStrict).UniversalDecoder(),
+		}
+
+		if err := a.Delete(context.TODO(), logr.Logger{}, backupBucket); err != nil {
+			t.Errorf("Delete() expected no error but got = %v", err)
+		}
+
+		err := testClient.Get(context.TODO(), client.ObjectKey{Name: secretName, Namespace: generatedSecretNamespace}, &corev1.Secret{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("expected generated secret to be deleted from seed cluster, but it was not. err: %v", err)
+		}
+	})
 }
 
 func TestActuator_DualZoneBucket_Delete(t *testing.T) {

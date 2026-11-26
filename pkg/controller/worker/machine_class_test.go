@@ -160,11 +160,81 @@ func TestMachineClassScalarQuoting(t *testing.T) {
 				}
 			}
 			assertString(mc, value, "providerSpec", "labels", "test")
+			assertString(mc, value, "providerSpec", "annotations", "test")
 			assertString(objects["Secret"], value, "metadata", "labels", "test")
 			assertString(objects["Secret"], base64.StdEncoding.EncodeToString([]byte(value)), "data", "userData")
 			egress, found, err := unstructured.NestedBool(mc, "providerSpec", "enableEgress")
 			if err != nil || !found || !egress {
 				t.Fatalf("enableEgress must remain a boolean: %v", err)
+			}
+		})
+	}
+}
+
+// The machine controller keeps the legacy egress label on new VMs only while
+// enableEgress is not set, and removes it for both true and false. The template
+// must therefore not turn "not set" into false.
+func TestMachineClassEnableEgress(t *testing.T) {
+	renderer := chartrenderer.NewWithServerVersion(&version.Info{GitVersion: "v1.35.0", Major: "1", Minor: "35"})
+	for _, tt := range []struct {
+		name string
+		set  bool
+		want bool
+	}{
+		{name: "not set"},
+		{name: "true", set: true, want: true},
+		{name: "false", set: true, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			machineClass := map[string]interface{}{
+				"name": "class", "project": "project", "addressPoolName": "pool", "subnetName": "subnet",
+				"orgClusterURL": "https://org.example", "registryURL": "registry.example:443", "caData": "Y2E=", "machineType": "type",
+				"nodeTemplate":         map[string]interface{}{"capacity": map[string]string{"cpu": "2"}, "instanceType": "type", "region": "region", "zone": "zone"},
+				"disks":                []map[string]interface{}{{"image": "image", "project": "project", "sizeGb": 20, "boot": true}},
+				"labels":               map[string]string{"test": "label"},
+				"annotations":          map[string]string{"test": "annotation"},
+				"resourceLabels":       map[string]string{"test": "label"},
+				"secret":               map[string]string{"cloudConfig": "config"},
+				"credentialsSecretRef": map[string]string{"name": "secret", "namespace": "namespace"},
+			}
+			if tt.set {
+				machineClass["enableEgress"] = tt.want
+			}
+			values := map[string]interface{}{"machineClasses": []map[string]interface{}{machineClass}}
+			rendered, err := renderer.RenderEmbeddedFS(charts.InternalChart, "internal/machineclass", "test", "namespace", values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mc map[string]interface{}
+			decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(rendered.Manifest()), 4096)
+			for {
+				var obj map[string]interface{}
+				err := decoder.Decode(&obj)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kind, _ := obj["kind"].(string); kind == "MachineClass" {
+					mc = obj
+				}
+			}
+			if mc == nil {
+				t.Fatal("no MachineClass was rendered")
+			}
+			value, found, err := unstructured.NestedFieldNoCopy(mc, "providerSpec", "enableEgress")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tt.set {
+				if found && value != nil {
+					t.Fatalf("enableEgress = %v, want it to stay unset", value)
+				}
+				return
+			}
+			if got, ok := value.(bool); !found || !ok || got != tt.want {
+				t.Fatalf("enableEgress = %v (found = %v), want %v", value, found, tt.want)
 			}
 		})
 	}

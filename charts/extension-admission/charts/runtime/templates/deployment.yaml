@@ -45,10 +45,22 @@ spec:
       {{- if .Values.kubeconfig }}
       automountServiceAccountToken: false
       {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: {{ include "name" . }}
         image: {{ include "image" .Values.image }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         command:
         - /extension-admission
         - --webhook-config-server-port={{ .Values.webhookConfig.serverPort }}
@@ -106,6 +118,8 @@ spec:
 {{ toYaml .Values.resources | nindent 10 }}
 {{- end }}
         volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         {{- if .Values.kubeconfig }}
         - name: gardener-extension-admission-gdch-kubeconfig
           mountPath: /etc/gardener-extension-admission-gdch/kubeconfig
@@ -117,6 +131,8 @@ spec:
           readOnly: true
         {{- end }}
       volumes:
+      - name: tmp
+        emptyDir: {}
       {{- if .Values.kubeconfig }}
       - name: gardener-extension-admission-gdch-kubeconfig
         secret:

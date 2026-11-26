@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/gardener/gardener/pkg/apis/core/install"
+	securityinstall "github.com/gardener/gardener/pkg/apis/security/install"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +35,7 @@ import (
 func TestSecretWebhookEnabledByDefault(t *testing.T) {
 	scheme := runtime.NewScheme()
 	install.Install(scheme)
+	securityinstall.Install(scheme)
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}

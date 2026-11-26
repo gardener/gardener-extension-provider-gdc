@@ -2034,6 +2034,28 @@ func Test_Reconcile_Error(t *testing.T) {
 			cluster:     gdcfake.CreateClusterWithCloudProfile(),
 			wantErrCont: "already exists and belongs to an older legacy shoot",
 		},
+		{
+			name: "Reconcile error - existing root subnet without IPv4 request or parent reference",
+			infra: func() *extensionsv1alpha1.Infrastructure {
+				i := baseInfra.DeepCopy()
+				i.Status.ProviderStatus = &runtime.RawExtension{Raw: []byte(`{}`)}
+				return i
+			}(),
+			objects: []client.Object{
+				secret,
+				&ipamglobalv1.Subnet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-infrastructure",
+						Namespace: "test-project",
+						Labels: map[string]string{
+							"infra-uid": infraUID,
+						},
+					},
+				},
+			},
+			cluster:     gdcfake.CreateClusterWithCloudProfile(),
+			wantErrCont: "root subnet \"test-infrastructure\" already exists without an IPv4 request or parent reference",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2056,6 +2078,39 @@ func Test_Reconcile_Error(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErrCont) {
 				t.Fatalf("actuator.Reconcile() error = %v, want error containing %q", err.Error(), tt.wantErrCont)
+			}
+		})
+	}
+}
+
+func Test_reconcileGlobalSubnet_ExistingSubnetWithoutRequestOrParent(t *testing.T) {
+	cidr := "10.0.212.0/30"
+	tests := []struct {
+		name string
+		spec ipamglobalv1.SubnetSpec
+	}{
+		{name: "empty spec"},
+		{name: "no parent reference", spec: ipamglobalv1.SubnetSpec{IPv4Request: &ipamv1.SubnetRequest{CIDR: &cidr}}},
+		{name: "no IPv4 request", spec: ipamglobalv1.SubnetSpec{ParentReference: &ipamv1.SubnetReference{Name: "test-infrastructure"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infra := &extensionsv1alpha1.Infrastructure{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-infrastructure", Namespace: "test-infrastructure-ns", UID: types.UID(infraUID)},
+			}
+			existing := &ipamglobalv1.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-infrastructure-zone1", Namespace: "test-project"},
+				Spec:       tt.spec,
+			}
+			c := createFakeClient(t, []client.Object{infra, existing}, infra)
+			zone := "zone1"
+
+			_, err := reconcileGlobalSubnet(context.Background(), c, nil, &zone, cidr, infra, &gdcapis.InfrastructureConfig{}, &auth.ServiceAccount{Project: "test-project"})
+			if err == nil || !strings.Contains(err.Error(), "already exists without an IPv4 request or parent reference") {
+				t.Fatalf("reconcileGlobalSubnet() error = %v, want an error about the existing subnet", err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(existing), &ipamglobalv1.Subnet{}); err != nil {
+				t.Fatalf("expected the existing subnet to be left in place, got %v", err)
 			}
 		})
 	}

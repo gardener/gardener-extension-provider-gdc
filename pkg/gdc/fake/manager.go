@@ -39,6 +39,11 @@ func (m *Manager) GetClient() client.Client {
 	return m.client
 }
 
+// GetAPIReader returns the client instance as an uncached reader in tests.
+func (m *Manager) GetAPIReader() client.Reader {
+	return m.client
+}
+
 // GetScheme returns the Scheme associated with the client field.
 func (m *Manager) GetScheme() *runtime.Scheme {
 	return m.client.Scheme()
