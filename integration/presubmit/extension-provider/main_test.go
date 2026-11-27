@@ -254,9 +254,20 @@ func TestExtensionProvider(t *testing.T) {
 // setup initializes the test environment, including clients, namespace, and helm chart.
 func setup(t *testing.T, ctx context.Context) *commonTestFixture {
 
-	// Initialize gdcloud
+	// Initialize gdcloud with bounded retries on transient VIP resets.
 	consoleURL := "https://console." + *org + "." + *zone + "." + *labURL
-	gdcClient, err := gdcloud.NewTestingClient(*cafile, *safile, consoleURL)
+	var (
+		gdcClient *gdcloud.TestingClient
+		err       error
+	)
+	for attempt := 1; attempt <= 4; attempt++ {
+		gdcClient, err = gdcloud.NewTestingClient(*cafile, *safile, consoleURL)
+		if err == nil {
+			break
+		}
+		t.Logf("Transient error initializing gdcloud client (attempt %d/4): %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+	}
 	if err != nil {
 		t.Fatalf("unable to initialize gdcloud %v", err)
 	}
@@ -350,6 +361,18 @@ func setupVCluster(t *testing.T, ctx context.Context, hostClient client.WithWatc
 				"fallbackHostCluster": true,
 			},
 		},
+	}
+
+	// Purge any leftover vcluster release from an interrupted prior run on the same commit.
+	staleSecret := &corev1.Secret{}
+	if getErr := hostClient.Get(ctx, client.ObjectKey{Namespace: hostNamespace, Name: "vc-" + vclusterName}, staleSecret); getErr == nil {
+		t.Logf("Found pre-existing vcluster %q in namespace %q from an interrupted run; uninstalling before fresh setup...", vclusterName, hostNamespace)
+		_, _ = helm.Uninstall(helm.UninstallOptions{
+			KubeconfigPath: hostKubeconfig,
+			ReleaseName:    vclusterName,
+			Namespace:      hostNamespace,
+			Wait:           true,
+		})
 	}
 
 	t.Logf("Installing Vcluster %q in namespace %q", vclusterName, hostNamespace)
@@ -621,8 +644,17 @@ func createTestFixture(t *testing.T, ctx context.Context, gdcClient *gdcloud.Tes
 func setupNamespace(t *testing.T, ctx context.Context, c client.WithWatch) string {
 	namespace := "extension-provider-" + ptr.Deref(commitHash, "")
 
-	if err := kubernetes.CreateNamespace(ctx, c, namespace); err != nil {
-		t.Fatalf("cannot create namespace %q, %v", namespace, err)
+	var lastErr error
+	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		createErr := kubernetes.CreateNamespace(ctx, c, namespace)
+		if createErr == nil || apierrors.IsAlreadyExists(createErr) {
+			return true, nil
+		}
+		lastErr = createErr
+		t.Logf("Transient error creating namespace %q: %v", namespace, createErr)
+		return false, nil
+	}); err != nil {
+		t.Fatalf("cannot create namespace %q: %v (poll err: %v)", namespace, lastErr, err)
 	}
 	t.Cleanup(func() {
 		t.Logf("Cleaning up namespace %q", namespace)
