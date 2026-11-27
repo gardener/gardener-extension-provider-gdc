@@ -123,6 +123,10 @@ unittests: $(GINKGO)
 test-integration:
 	@./scripts/ci-integration-test.sh
 
+.PHONY: test-ci-scripts
+test-ci-scripts:
+	@bash ./scripts/ci-common_test.sh
+
 .PHONY: docker-image-provider
 docker-image-provider:
 	@docker build $(DOCKER_PLATFORM_ARGS) -t $(IMAGE_REPOSITORY_PROVIDER):$(IMAGE_TAG) -f Dockerfile --target gardener-extension-provider-gdch .
@@ -142,6 +146,7 @@ help: ## Display available targets
 	@echo "  make test                  - Runs unit test suite across all packages"
 	@echo "  make unittests             - Alias for test"
 	@echo "  make test-integration      - Runs presubmit integration tests against GDC"
+	@echo "  make test-ci-scripts       - Runs the tests of the CI helper scripts (scripts/ci-common.sh)"
 	@echo "  make build-local           - Builds binaries locally in current environment"
 	@echo "  make release               - Builds cross-compiled release binaries"
 	@echo "  make docker-image-provider - Builds provider Docker image"
