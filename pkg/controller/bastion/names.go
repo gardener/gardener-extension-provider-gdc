@@ -14,18 +14,39 @@
 
 package bastion
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+)
 
 const (
 	bastionSetupScriptNameSuffix          = "bastion-setup-script"
 	bastionProjectNetworkPolicyNameSuffix = "allow-ssh"
 	bastionVirtualMachineDiskNameSuffix   = "bastion-vm-disk"
 	bastionVirtualMachineNameSuffix       = "bastion-vm"
+
+	// VMLabelKey is the key of the label that identifies the Bastion Virtual Machine.
+	// The ProjectNetworkPolicy of the bastion selects the Virtual Machine by this label.
+	VMLabelKey = "provider.extensions.gardener.gdc.goog/bastion"
+	// maxLabelValueLength is the maximum length of a Kubernetes label value.
+	maxLabelValueLength = 63
 )
 
 // VMName returns the name of the Bastion Virtual Machine.
 func VMName(bastionName string) string {
 	return fmt.Sprintf("%s-%s", bastionName, bastionVirtualMachineNameSuffix)
+}
+
+// VMLabels returns the labels that identify the Bastion Virtual Machine. The value is the
+// name of the Virtual Machine, or a digest of it if the name is too long for a label value.
+func VMLabels(bastionName string) map[string]string {
+	value := VMName(bastionName)
+	if len(value) > maxLabelValueLength {
+		digest := sha256.Sum256([]byte(value))
+		value = "bastion-" + hex.EncodeToString(digest[:])[:32]
+	}
+	return map[string]string{VMLabelKey: value}
 }
 
 // DiskName returns the name of the Bastion Virtual Machine Disk.

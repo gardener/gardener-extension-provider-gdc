@@ -18,7 +18,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,6 +37,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	gdcnetworkingv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/networking/v1"
 	vmv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/virtualmachine/v1"
 
 	"github.com/gardener/gardener-extension-provider-gdc/pkg/apis/gdc/v1alpha1"
@@ -92,6 +96,9 @@ func (f *bastionTestFixture) test(t *testing.T) {
 
 		// Assert: Bastion is in Succeeded state and has Ingress
 		f.assertBastionReady(ctx, t, bastion)
+
+		// Assert: the network policy of the bastion opens only SSH to the bastion VM
+		f.assertBastionNetworkPolicy(ctx, t, bastion)
 	})
 
 }
@@ -109,10 +116,17 @@ func (f *bastionTestFixture) createBastionObject() *extensionsv1alpha1.Bastion {
 				Type: "gdch",
 			},
 			UserData: []byte("echo hello"),
+			// Two CIDRs that together cover every IPv4 source, so that the policy has to
+			// carry more than one CIDR.
 			Ingress: []extensionsv1alpha1.BastionIngressPolicy{
 				{
 					IPBlock: networkingv1.IPBlock{
-						CIDR: "0.0.0.0/0",
+						CIDR: "0.0.0.0/1",
+					},
+				},
+				{
+					IPBlock: networkingv1.IPBlock{
+						CIDR: "128.0.0.0/1",
 					},
 				},
 			},
@@ -141,7 +155,86 @@ func (f *bastionTestFixture) cleanupBastion(ctx context.Context, bastion *extens
 	return nil
 }
 
-// assertBastionResourcesDeleted verifies that all dependent resources (VM, Disk, ExternalAccess) are deleted.
+// assertBastionNetworkPolicy verifies that the ProjectNetworkPolicy of the bastion selects only
+// the bastion VM, allows only the SSH port, lists every ingress CIDR of the bastion, and has
+// been accepted and propagated by GDC.
+func (f *bastionTestFixture) assertBastionNetworkPolicy(ctx context.Context, t *testing.T, bastion *extensionsv1alpha1.Bastion) {
+	t.Helper()
+	vmName := bastioncontroller.VMName(bastion.Name)
+	wantLabels := bastioncontroller.VMLabels(bastion.Name)
+
+	vm := &vmv1.VirtualMachine{}
+	if err := f.mgmtClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: vmName}, vm); err != nil {
+		t.Fatalf("failed to get VirtualMachine %s: %v", vmName, err)
+	}
+	for key, value := range wantLabels {
+		if vm.Labels[key] != value {
+			t.Errorf("VirtualMachine %s has label %s=%q, want %q", vmName, key, vm.Labels[key], value)
+		}
+	}
+
+	policyName := bastioncontroller.ProjectNetworkPolicyName(bastion.Name)
+	policy := &gdcnetworkingv1.ProjectNetworkPolicy{}
+	if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
+		if err := f.mgmtClient.Get(ctx, client.ObjectKey{Namespace: f.project, Name: policyName}, policy); err != nil {
+			t.Logf("failed to get ProjectNetworkPolicy %s: %v", policyName, err)
+			return false, nil
+		}
+		if !meta.IsStatusConditionTrue(policy.Status.Conditions, "Ready") {
+			t.Logf("ProjectNetworkPolicy %s is not Ready yet: %+v", policyName, policy.Status.Conditions)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("ProjectNetworkPolicy %s is not Ready: %v", policyName, err)
+	}
+	t.Logf("ProjectNetworkPolicy %s is Ready, spec: %+v", policyName, policy.Spec)
+
+	// Subject: only the bastion VM.
+	subject := policy.Spec.Subject
+	if subject.SubjectType != gdcnetworkingv1.PolicySubjectTypeUserWorkload {
+		t.Errorf("ProjectNetworkPolicy %s has subject type %q, want %q", policyName, subject.SubjectType, gdcnetworkingv1.PolicySubjectTypeUserWorkload)
+	}
+	if subject.UserWorkloadSelector == nil || subject.UserWorkloadSelector.LabelSelector == nil || subject.UserWorkloadSelector.LabelSelector.Workloads == nil {
+		t.Fatalf("ProjectNetworkPolicy %s does not select workloads by label, so it applies to every workload in the project: %+v", policyName, subject)
+	}
+	selector := subject.UserWorkloadSelector.LabelSelector
+	if !maps.Equal(selector.Workloads.MatchLabels, wantLabels) || len(selector.Workloads.MatchExpressions) != 0 {
+		t.Errorf("ProjectNetworkPolicy %s selects workloads by %+v, want the labels of the bastion VM %v", policyName, selector.Workloads, wantLabels)
+	}
+	if selector.Clusters != nil || selector.Namespaces != nil {
+		t.Errorf("ProjectNetworkPolicy %s selects by cluster or namespace: %+v", policyName, selector)
+	}
+
+	// Rule: only the SSH port, from the ingress CIDRs of the bastion.
+	if len(policy.Spec.Ingress) != 1 {
+		t.Fatalf("ProjectNetworkPolicy %s has %d ingress rules, want 1", policyName, len(policy.Spec.Ingress))
+	}
+	rule := policy.Spec.Ingress[0]
+	if len(rule.Protocols) != 0 || len(rule.Ports) != 1 ||
+		ptr.Deref(rule.Ports[0].Protocol, "") != corev1.ProtocolTCP ||
+		rule.Ports[0].Port == nil || rule.Ports[0].Port.IntValue() != 22 {
+		t.Errorf("ProjectNetworkPolicy %s allows ports %+v and protocols %+v, want only TCP port 22", policyName, rule.Ports, rule.Protocols)
+	}
+	if len(rule.From) != 1 {
+		t.Fatalf("ProjectNetworkPolicy %s has %d peers, want 1", policyName, len(rule.From))
+	}
+	var gotCIDRs, wantCIDRs []string
+	for _, block := range rule.From[0].IPBlocks {
+		gotCIDRs = append(gotCIDRs, block.CIDR)
+	}
+	if rule.From[0].IPBlock != nil {
+		gotCIDRs = append(gotCIDRs, rule.From[0].IPBlock.CIDR)
+	}
+	for _, ingress := range bastion.Spec.Ingress {
+		wantCIDRs = append(wantCIDRs, ingress.IPBlock.CIDR)
+	}
+	if !slices.Equal(gotCIDRs, wantCIDRs) || rule.From[0].Projects != nil || rule.From[0].ProjectSelector != nil {
+		t.Errorf("ProjectNetworkPolicy %s allows peer %+v, want only the CIDRs %v", policyName, rule.From[0], wantCIDRs)
+	}
+}
+
+// assertBastionResourcesDeleted verifies that all dependent resources (VM, Disk, ExternalAccess, ProjectNetworkPolicy) are deleted.
 func (f *bastionTestFixture) assertBastionResourcesDeleted(ctx context.Context, t *testing.T, bastion *extensionsv1alpha1.Bastion) {
 	t.Helper()
 	vmName := bastioncontroller.VMName(bastion.Name)
@@ -151,6 +244,7 @@ func (f *bastionTestFixture) assertBastionResourcesDeleted(ctx context.Context, 
 		&vmv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: f.project}},
 		&vmv1.VirtualMachineExternalAccess{ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: f.project}},
 		&vmv1.VirtualMachineDisk{ObjectMeta: metav1.ObjectMeta{Name: diskName, Namespace: f.project}},
+		&gdcnetworkingv1.ProjectNetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: bastioncontroller.ProjectNetworkPolicyName(bastion.Name), Namespace: f.project}},
 	}
 
 	for _, obj := range resources {
