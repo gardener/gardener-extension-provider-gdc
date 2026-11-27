@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -107,7 +108,7 @@ func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, bastion *exte
 		return fmt.Errorf("error getting machine type: %w", err)
 	}
 
-	_, err = createOrUpdateVirtualMachine(ctx, kubeClient, project, bastion, version.Image, image.Project, machineType)
+	vm, err := createOrUpdateVirtualMachine(ctx, kubeClient, project, bastion, version.Image, image.Project, machineType)
 	if err != nil {
 		return errors.DetermineError(fmt.Errorf("error creating virtual machine: %w", err))
 	}
@@ -117,7 +118,7 @@ func (a *actuator) Reconcile(ctx context.Context, log logr.Logger, bastion *exte
 		return errors.DetermineError(fmt.Errorf("error creating virtual machine external access: %w", err))
 	}
 
-	err = createOrUpdateProjectNetworkPolicy(ctx, kubeClient, project, bastion)
+	err = createOrUpdateProjectNetworkPolicy(ctx, kubeClient, project, bastion, vm)
 	if err != nil {
 		return fmt.Errorf("error creating project network policy: %w", err)
 	}
@@ -159,15 +160,44 @@ func findMostSuitableMachineType(profile *gardencorev1beta1.CloudProfile) (machi
 	return
 }
 
-// createOrUpdateProjectNetworkPolicy creates or updates the ProjectNetworkPolicy to allow connections from the given CIDR to the project of the bastion VM.
-func createOrUpdateProjectNetworkPolicy(ctx context.Context, kubeClient client.Client, project string, bastion *extensionsv1alpha1.Bastion) error {
-	from := []gdchnetworkingv1.ProjectNetworkPolicyPeer{}
+// sshPort is the only port the ProjectNetworkPolicy of a bastion opens.
+const sshPort = 22
+
+// createOrUpdateProjectNetworkPolicy creates or updates the ProjectNetworkPolicy CR that lets
+// the ingress CIDRs of the bastion reach the bastion VM over SSH.
+//
+// A ProjectNetworkPolicy without a workload selector applies to every workload in the
+// project, and one without ports allows every port. Both are therefore always set, so that a
+// bastion opens nothing but SSH to its own VM.
+func createOrUpdateProjectNetworkPolicy(ctx context.Context, kubeClient client.Client, project string, bastion *extensionsv1alpha1.Bastion, vm *vmv1.VirtualMachine) error {
+	// A rule without peers matches every source.
+	if len(bastion.Spec.Ingress) == 0 {
+		return fmt.Errorf("bastion %q does not specify any ingress CIDR", bastion.Name)
+	}
+	ipBlocks := make([]k8snetworkingv1.IPBlock, 0, len(bastion.Spec.Ingress))
 	for _, ingress := range bastion.Spec.Ingress {
-		from = append(from, gdchnetworkingv1.ProjectNetworkPolicyPeer{
-			IPBlock: &k8snetworkingv1.IPBlock{
-				CIDR: ingress.IPBlock.CIDR,
-			},
+		ipBlocks = append(ipBlocks, k8snetworkingv1.IPBlock{
+			CIDR: ingress.IPBlock.CIDR,
 		})
+	}
+	// A rule takes at most one peer. A single CIDR keeps the form used so far; several
+	// CIDRs go into the list of the same peer.
+	peer := gdchnetworkingv1.ProjectNetworkPolicyPeer{IPBlocks: ipBlocks}
+	if len(ipBlocks) == 1 {
+		peer = gdchnetworkingv1.ProjectNetworkPolicyPeer{IPBlock: &ipBlocks[0]}
+	}
+
+	subject := gdchnetworkingv1.ProjectNetworkPolicySubject{
+		SubjectType: gdchnetworkingv1.PolicySubjectTypeUserWorkload,
+	}
+	if hasVMLabels(vm, bastion.Name) {
+		subject.UserWorkloadSelector = &gdchnetworkingv1.WorkloadSelector{
+			LabelSelector: &gdchnetworkingv1.WorkloadLabelSelector{
+				Workloads: &metav1.LabelSelector{
+					MatchLabels: VMLabels(bastion.Name),
+				},
+			},
+		}
 	}
 
 	pnp := &gdchnetworkingv1.ProjectNetworkPolicy{
@@ -179,13 +209,17 @@ func createOrUpdateProjectNetworkPolicy(ctx context.Context, kubeClient client.C
 
 	if _, err := controllerutil.CreateOrUpdate(ctx, kubeClient, pnp, func() error {
 		pnp.Spec = gdchnetworkingv1.ProjectNetworkPolicySpec{
-			Subject: gdchnetworkingv1.ProjectNetworkPolicySubject{
-				SubjectType: "UserWorkload",
-			},
+			Subject:    subject,
 			PolicyType: gdchnetworkingv1.PolicyTypeIngress,
 			Ingress: []gdchnetworkingv1.ProjectNetworkPolicyIngressRule{
 				{
-					From: from,
+					Ports: []gdchnetworkingv1.ProjectNetworkPolicyPort{
+						{
+							Protocol: ptr.To(corev1.ProtocolTCP),
+							Port:     ptr.To(intstr.FromInt32(sshPort)),
+						},
+					},
+					From: []gdchnetworkingv1.ProjectNetworkPolicyPeer{peer},
 				},
 			},
 		}
@@ -195,6 +229,20 @@ func createOrUpdateProjectNetworkPolicy(ctx context.Context, kubeClient client.C
 	}
 
 	return nil
+}
+
+// hasVMLabels reports whether the bastion VM carries the labels the ProjectNetworkPolicy
+// selects it by.
+func hasVMLabels(vm *vmv1.VirtualMachine, bastionName string) bool {
+	if vm == nil {
+		return false
+	}
+	for key, value := range VMLabels(bastionName) {
+		if vm.Labels[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // createOrUpdateSetupScriptSecret creates or updates the Secret CR containing the setup script for the bastion VM.
@@ -275,6 +323,17 @@ func createOrUpdateVirtualMachine(ctx context.Context, kubeClient client.Client,
 	}
 
 	if _, err := controllerutil.CreateOrUpdate(ctx, kubeClient, vm, func() error {
+		// Only a new VM gets the labels the ProjectNetworkPolicy selects it by. A VM that
+		// is already running without them is left as it is; its policy keeps applying to
+		// all workloads until the bastion is deleted, so that its SSH access is not cut.
+		if vm.CreationTimestamp.IsZero() {
+			if vm.Labels == nil {
+				vm.Labels = map[string]string{}
+			}
+			for key, value := range VMLabels(bastion.Name) {
+				vm.Labels[key] = value
+			}
+		}
 		vm.Spec = vmv1.VirtualMachineSpec{
 			Compute: vmv1.Compute{
 				VirtualMachineType: machineType,

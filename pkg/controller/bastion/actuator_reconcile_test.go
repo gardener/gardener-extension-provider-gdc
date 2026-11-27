@@ -26,6 +26,7 @@ import (
 	gardenercorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	"github.com/go-logr/logr"
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -214,6 +215,13 @@ func Test_actuator_Reconcile(t *testing.T) {
 			if pnp.Spec.Ingress[0].From[0].IPBlock.CIDR != bastion.Spec.Ingress[0].IPBlock.CIDR {
 				t.Fatalf("expected project network policy ingress cidr to be %q but got %q", bastion.Spec.Ingress[0].IPBlock.CIDR, pnp.Spec.Ingress[0].From[0].IPBlock.CIDR)
 			}
+			// The policy opens the SSH port of the bastion VM and nothing else.
+			if diff := cmp.Diff(bastionVMSelector(bastion.Name), pnp.Spec.Subject.UserWorkloadSelector); diff != "" {
+				t.Fatalf("project network policy does not select the bastion vm (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(sshOnly(), pnp.Spec.Ingress[0].Ports); diff != "" {
+				t.Fatalf("project network policy ports mismatch (-want +got):\n%s", diff)
+			}
 
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
@@ -264,6 +272,9 @@ func Test_actuator_Reconcile(t *testing.T) {
 			}
 			if vm.Spec.StartupScripts[0].ScriptSecretRef.Name != secret.Name {
 				t.Fatalf("expected startup script name to be %q but got %q", secret.Name, vm.Spec.StartupScripts[0].ScriptSecretRef.Name)
+			}
+			if diff := cmp.Diff(VMLabels(bastion.Name), vm.Labels); diff != "" {
+				t.Fatalf("vm labels mismatch (-want +got):\n%s", diff)
 			}
 
 			bastionExternalAccess := &vmv1.VirtualMachineExternalAccess{
