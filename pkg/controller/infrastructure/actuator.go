@@ -270,6 +270,7 @@ func (a *actuator) createShootVMSubnets(ctx context.Context, globalKubeClient cl
 		"serviceAccountProject", serviceAccount.Project,
 	)
 
+	infraUID := string(infrastructure.UID)
 	_, err := reconcileRootSubnet(ctx, globalKubeClient, zonalKubeClients, infrastructure, infraConfig, serviceAccount, seedName)
 	if err != nil {
 		return nil, fmt.Errorf("error creating infrastructure node subnet %q (project: %s, nodeCIDR: %s): %w",
@@ -287,14 +288,21 @@ func (a *actuator) createShootVMSubnets(ctx context.Context, globalKubeClient cl
 		}
 
 		// Wait for the global subnet to be propagated to the zone
-		if _, err := waitForZonalSubnetReady(ctx, zoneSubnetName, serviceAccount.Project, zonalKubeClients[zone.Name]); err != nil {
+		propagatedSubnet, err := waitForZonalSubnetReady(ctx, zoneSubnetName, serviceAccount.Project, zonalKubeClients[zone.Name])
+		if err != nil {
 			return nil, fmt.Errorf("timeout waiting for global subnet %q to propagate to zone %s (project: %s): %w",
 				zoneSubnetName, zone.Name, serviceAccount.Project, err)
+		}
+		// A zonal subnet with this name can also belong to another shoot. The network subnet
+		// must only be created below the copy of the zone subnet of this shoot.
+		if !ownsPropagatedSubnet(propagatedSubnet, infrastructure.Name, serviceAccount.Project, true, true) {
+			return nil, fmt.Errorf("terminal error: zonal subnet %q in zone %s is not the propagated copy of the zone subnet of this shoot. Please use a different shoot name to fix",
+				zoneSubnetName, zone.Name)
 		}
 
 		// network subnet name example: z-shoot-garden-cluster1-europe-east1
 		zoneNetworkSubnetName := "z-" + infrastructure.Name + "-" + zone.Name
-		zoneNetworkSubnet, err := ReconcileZonalSubnet(ctx, zonalKubeClients[zone.Name], zone.CIDR, zoneNetworkSubnetName, zoneSubnetName, serviceAccount.Project)
+		zoneNetworkSubnet, err := ReconcileZonalSubnet(ctx, zonalKubeClients[zone.Name], zone.CIDR, zoneNetworkSubnetName, zoneSubnetName, serviceAccount.Project, infraUID)
 		if err != nil {
 			return nil, fmt.Errorf("error creating infrastructure zone network subnet %q (zone: %s, cidr: %s): %w",
 				zoneNetworkSubnetName, zone.Name, zone.CIDR, err)
@@ -441,8 +449,8 @@ func reconcileRootSubnet(
 			Name:      infrastructure.Name,
 			Namespace: serviceAccount.Project,
 			Labels: map[string]string{
-				labelKey:    labelValue,
-				"infra-uid": infraUID,
+				labelKey:      labelValue,
+				infraUIDLabel: infraUID,
 			},
 		},
 		Spec: ipamglobalv1.SubnetSpec{
@@ -465,7 +473,7 @@ func reconcileRootSubnet(
 	} else {
 		// if found subnet with label "infra-uid",  we check if the UID matches
 		// In case of the UIDs are not matched, it means this subnet belongs to another shoot, throw an error
-		existingUID, exists := curSubnet.Labels["infra-uid"]
+		existingUID, exists := curSubnet.Labels[infraUIDLabel]
 
 		if exists {
 			// If the label exists but DOES NOT match, it belongs to someone else. Reject.
@@ -487,7 +495,7 @@ func reconcileRootSubnet(
 			if curSubnet.Labels == nil {
 				curSubnet.Labels = make(map[string]string)
 			}
-			curSubnet.Labels["infra-uid"] = infraUID
+			curSubnet.Labels[infraUIDLabel] = infraUID
 			curSubnet.Labels[labelKey] = labelValue
 
 			if err := globalKubeclient.Patch(ctx, curSubnet, patch); err != nil {
@@ -542,6 +550,7 @@ func reconcileGlobalSubnet(
 	serviceAccount *auth.ServiceAccount,
 ) (*ipamglobalv1.Subnet, error) {
 	subnetName := infrastructure.Name + "-" + *propagationZone
+	infraUID := string(infrastructure.UID)
 	subnet := &ipamglobalv1.Subnet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      subnetName,
@@ -557,13 +566,28 @@ func reconcileGlobalSubnet(
 			return nil, err
 		}
 	} else {
+		// A subnet with this name can also belong to another shoot. It is only changed or
+		// deleted once it is known to be a subnet of this shoot.
+		if err := claimSubnet(ctx, globalKubeclient, curSubnet, curSubnet.Spec.ParentReference, infraUID, infrastructure.Name, serviceAccount.Project); err != nil {
+			return nil, err
+		}
 		if !ptrutil.Equal(curSubnet.Spec.IPv4Request.CIDR, &subnetCIDR) || curSubnet.Spec.ParentReference.Name != infrastructure.Name {
 			zonalSubnet := "z-" + infrastructure.Name + "-" + *propagationZone
-			err = deleteZonalSubnet(ctx, zonalKubeClients[*propagationZone], serviceAccount.Project, zonalSubnet)
+			zonalClient := zonalKubeClients[*propagationZone]
+			networkSubnet := &ipamv1.Subnet{}
+			exists, err := getSubnet(ctx, zonalClient, serviceAccount.Project, zonalSubnet, networkSubnet)
 			if err != nil {
 				return nil, err
 			}
-			err := deleteSubnet(ctx, globalKubeclient, serviceAccount.Project, subnetName)
+			if exists {
+				if !ownsChildSubnet(networkSubnet.Labels, networkSubnet.Spec.ParentReference, infraUID, subnetName, serviceAccount.Project, true) {
+					return nil, fmt.Errorf("terminal error: zonal subnet %q is occupied by another shoot. Please use a different shoot name to fix", zonalSubnet)
+				}
+				if err := deleteZonalSubnet(ctx, zonalClient, serviceAccount.Project, zonalSubnet); err != nil {
+					return nil, err
+				}
+			}
+			err = deleteSubnet(ctx, globalKubeclient, serviceAccount.Project, subnetName)
 			if err != nil {
 				return nil, err
 			}
@@ -606,6 +630,7 @@ func createGlobalSubnet(
 	}
 	subnet.Labels["ipam.gdc.goog/vpc"] = "default-vpc"
 	subnet.Labels["ipam.gdc.goog/usage"] = "zone-network-root-range"
+	subnet.Labels[infraUIDLabel] = string(infrastructure.UID)
 
 	if err := globalKubeclient.Create(ctx, subnet); err != nil {
 		return nil, fmt.Errorf("failed to create Subnet: %w", err)
@@ -613,6 +638,9 @@ func createGlobalSubnet(
 	return subnet, nil
 }
 
+// ReconcileZonalSubnet creates the network subnet of a zone below the subnet called
+// parentSubnetName, or takes over the existing one if it belongs to the Infrastructure
+// with the given UID.
 func ReconcileZonalSubnet(
 	ctx context.Context,
 	zonalKubeclient client.Client,
@@ -620,6 +648,7 @@ func ReconcileZonalSubnet(
 	subnetName string,
 	parentSubnetName string,
 	namespace string,
+	infraUID string,
 ) (*ipamv1.Subnet, error) {
 	subnet := &ipamv1.Subnet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -631,6 +660,7 @@ func ReconcileZonalSubnet(
 		subnet.Labels = map[string]string{}
 	}
 	subnet.Labels["ipam.gdc.goog/vpc"] = "default-vpc"
+	subnet.Labels[infraUIDLabel] = infraUID
 
 	subnet.Spec = ipamv1.SubnetSpec{
 		Type: ipamv1.Branch,
@@ -646,7 +676,8 @@ func ReconcileZonalSubnet(
 			EnableGateway: true,
 		},
 	}
-	err := zonalKubeclient.Get(ctx, client.ObjectKey{Name: subnet.Name, Namespace: subnet.Namespace}, &ipamv1.Subnet{})
+	curSubnet := &ipamv1.Subnet{}
+	err := zonalKubeclient.Get(ctx, client.ObjectKey{Name: subnet.Name, Namespace: subnet.Namespace}, curSubnet)
 	if apierrors.IsNotFound(err) {
 		err := zonalKubeclient.Create(ctx, subnet)
 		if err != nil {
@@ -654,6 +685,10 @@ func ReconcileZonalSubnet(
 		}
 	} else if err != nil {
 		return nil, fmt.Errorf("unable to get Subnet: %w", err)
+	} else if err := claimSubnet(ctx, zonalKubeclient, curSubnet, curSubnet.Spec.ParentReference, infraUID, parentSubnetName, namespace); err != nil {
+		// A subnet with this name can also belong to another shoot, which must not be used
+		// as the node network of this one.
+		return nil, err
 	}
 	subnet, err = waitForZonalSubnetReady(ctx, subnetName, namespace, zonalKubeclient)
 	if err != nil {
@@ -835,22 +870,97 @@ func findManagementURL(zoneName string, cp *gdcapis.CloudProfileConfig) (string,
 	return "", fmt.Errorf("could not find zone %s in cloud profile", zoneName)
 }
 
+// deleteAllSubnets deletes the subnets of the Infrastructure. Subnets are named after the
+// shoot, so a subnet with one of the expected names can belong to another shoot. Only
+// subnets that are known to belong to this Infrastructure are deleted; the others are left
+// untouched and are not treated as an error, so that a shoot which never owned them can be
+// deleted.
 func deleteAllSubnets(ctx context.Context, infrastructure *extensionsv1alpha1.Infrastructure, infraConfig *gdcapis.InfrastructureConfig, globalKubeclient client.Client, zonalKubeClients map[string]client.WithWatch, serviceAccount *auth.ServiceAccount) error {
+	log := logr.FromContextOrDiscard(ctx).WithValues("infrastructureName", infrastructure.Name, "infrastructureNamespace", infrastructure.Namespace, "project", serviceAccount.Project)
+	project := serviceAccount.Project
+	infraUID := string(infrastructure.UID)
+
+	rootSubnet := &ipamglobalv1.Subnet{}
+	rootExists, err := getSubnet(ctx, globalKubeclient, project, infrastructure.Name, rootSubnet)
+	if err != nil {
+		return errors.DetermineError(err)
+	}
+	rootOwned := rootExists && isRootSubnetOwned(rootSubnet, infrastructure)
+	if rootExists && !rootOwned {
+		log.Info("Root subnet does not belong to this Infrastructure, leaving it and its subnets in place", "subnet", infrastructure.Name)
+	}
+
 	for _, zone := range infraConfig.Networks.Zones {
-		zoneNetworkSubnetName := "z-" + infrastructure.Name + "-" + zone.Name
-		if err := deleteZonalSubnet(ctx, zonalKubeClients[zone.Name], serviceAccount.Project, zoneNetworkSubnetName); err != nil {
-			return errors.DetermineError(err)
-		}
+		zonalClient := zonalKubeClients[zone.Name]
 		zoneSubnetName := infrastructure.Name + "-" + zone.Name
-		if err := deleteZonalSubnet(ctx, zonalKubeClients[zone.Name], serviceAccount.Project, zoneSubnetName); err != nil {
+		zoneNetworkSubnetName := "z-" + zoneSubnetName
+
+		// The zone subnet decides about the unlabelled subnets in the zone: GDC propagates
+		// a copy of it into the zone, and the network subnet is a child of that copy.
+		zoneSubnet := &ipamglobalv1.Subnet{}
+		zoneSubnetExists, err := getSubnet(ctx, globalKubeclient, project, zoneSubnetName, zoneSubnet)
+		if err != nil {
 			return errors.DetermineError(err)
 		}
-		if err := deleteSubnet(ctx, globalKubeclient, serviceAccount.Project, zoneSubnetName); err != nil {
+		zoneSubnetOwned := zoneSubnetExists && ownsChildSubnet(zoneSubnet.Labels, zoneSubnet.Spec.ParentReference, infraUID, infrastructure.Name, project, rootOwned)
+		zoneOwned := rootOwned
+		if zoneSubnetExists {
+			zoneOwned = zoneSubnetOwned
+		}
+
+		// The copy that GDC propagates into the zone is the parent of the network subnet.
+		// While it exists, it decides about a network subnet without the owner label.
+		propagatedSubnet := &ipamv1.Subnet{}
+		propagatedExists, err := getSubnet(ctx, zonalClient, project, zoneSubnetName, propagatedSubnet)
+		if err != nil {
 			return errors.DetermineError(err)
+		}
+		propagatedOwned := propagatedExists && ownsPropagatedSubnet(propagatedSubnet, infrastructure.Name, project, zoneSubnetExists, zoneOwned)
+		networkParentOwned := zoneOwned
+		if propagatedExists {
+			networkParentOwned = propagatedOwned
+		}
+
+		networkSubnet := &ipamv1.Subnet{}
+		exists, err := getSubnet(ctx, zonalClient, project, zoneNetworkSubnetName, networkSubnet)
+		if err != nil {
+			return errors.DetermineError(err)
+		}
+		if exists {
+			if ownsChildSubnet(networkSubnet.Labels, networkSubnet.Spec.ParentReference, infraUID, zoneSubnetName, project, networkParentOwned) {
+				if err := deleteZonalSubnet(ctx, zonalClient, project, zoneNetworkSubnetName); err != nil {
+					return errors.DetermineError(err)
+				}
+			} else {
+				log.Info("Zonal subnet does not belong to this Infrastructure, leaving it in place", "subnet", zoneNetworkSubnetName, "zone", zone.Name)
+			}
+		}
+
+		if propagatedExists {
+			if propagatedOwned {
+				if err := deleteZonalSubnet(ctx, zonalClient, project, zoneSubnetName); err != nil {
+					return errors.DetermineError(err)
+				}
+			} else {
+				log.Info("Zonal subnet does not belong to this Infrastructure, leaving it in place", "subnet", zoneSubnetName, "zone", zone.Name)
+			}
+		}
+
+		if zoneSubnetExists {
+			if zoneSubnetOwned {
+				if err := deleteSubnet(ctx, globalKubeclient, project, zoneSubnetName); err != nil {
+					return errors.DetermineError(err)
+				}
+			} else {
+				log.Info("Zone subnet does not belong to this Infrastructure, leaving it in place", "subnet", zoneSubnetName)
+			}
 		}
 	}
-	if err := deleteSubnet(ctx, globalKubeclient, serviceAccount.Project, infrastructure.Name); err != nil {
-		return errors.DetermineError(err)
+
+	if rootOwned {
+		if err := deleteSubnet(ctx, globalKubeclient, project, infrastructure.Name); err != nil {
+			return errors.DetermineError(err)
+		}
 	}
 	return nil
 }

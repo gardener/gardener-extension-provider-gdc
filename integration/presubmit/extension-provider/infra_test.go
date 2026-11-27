@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,6 +137,13 @@ func (f *infraTestFixture) test(t *testing.T) {
 			t.Parallel()
 			namespace, saSecretName := f.setupInfraTestEnvironment(ctx, t, caData)
 			f.testMultiZoneInfrastructureCloudNAT(ctx, t, namespace, saSecretName)
+		})
+
+		t.Run("SameNameInfrastructureKeepsSubnets", func(t *testing.T) {
+			t.Parallel()
+			namespace, saSecretName := f.setupInfraTestEnvironment(ctx, t, caData)
+			otherNamespace, otherSASecretName := f.setupInfraTestEnvironment(ctx, t, caData)
+			f.testSameNameInfrastructureKeepsSubnets(ctx, t, namespace, saSecretName, otherNamespace, otherSASecretName)
 		})
 	})
 }
@@ -757,6 +765,224 @@ func (f *infraTestFixture) testMultiZoneInfrastructureCloudNAT(ctx context.Conte
 		}
 	} else {
 		t.Errorf("Egress CIDRs length mismatch after collection: expected %d, got %d", len(expectedEgressCIDRs), len(infra.Status.EgressCIDRs))
+	}
+}
+
+// infraSubnets are the subnets the extension creates for a single-zone Infrastructure.
+type infraSubnets struct {
+	root       *ipamglobalv1.Subnet
+	zone       *ipamglobalv1.Subnet
+	propagated *ipamv1.Subnet
+	network    *ipamv1.Subnet
+}
+
+// getInfraSubnets reads the subnets of the Infrastructure called infraName in the test zone.
+func (f *infraTestFixture) getInfraSubnets(ctx context.Context, infraName string) (*infraSubnets, error) {
+	subnets := &infraSubnets{
+		root:       &ipamglobalv1.Subnet{},
+		zone:       &ipamglobalv1.Subnet{},
+		propagated: &ipamv1.Subnet{},
+		network:    &ipamv1.Subnet{},
+	}
+	zoneSubnetName := infraName + "-" + *zone
+	if err := f.globalClient.Get(ctx, client.ObjectKey{Name: infraName, Namespace: f.project}, subnets.root); err != nil {
+		return nil, fmt.Errorf("root subnet %s: %w", infraName, err)
+	}
+	if err := f.globalClient.Get(ctx, client.ObjectKey{Name: zoneSubnetName, Namespace: f.project}, subnets.zone); err != nil {
+		return nil, fmt.Errorf("zone subnet %s: %w", zoneSubnetName, err)
+	}
+	if err := f.mgmtClient.Get(ctx, client.ObjectKey{Name: zoneSubnetName, Namespace: f.project}, subnets.propagated); err != nil {
+		return nil, fmt.Errorf("propagated zone subnet %s: %w", zoneSubnetName, err)
+	}
+	if err := f.mgmtClient.Get(ctx, client.ObjectKey{Name: "z-" + zoneSubnetName, Namespace: f.project}, subnets.network); err != nil {
+		return nil, fmt.Errorf("network subnet z-%s: %w", zoneSubnetName, err)
+	}
+	return subnets, nil
+}
+
+// testSameNameInfrastructureKeepsSubnets creates two Infrastructures with the same name in
+// two shoot namespaces that use the same GDC project, as two shoots with the same name in
+// different garden projects do. Subnets are named after the shoot, so the second
+// Infrastructure meets the subnets of the first one under the names it would use itself.
+// It must fail to reconcile, and deleting it must leave those subnets untouched.
+func (f *infraTestFixture) testSameNameInfrastructureKeepsSubnets(ctx context.Context, t *testing.T, namespace, saSecretName, otherNamespace, otherSASecretName string) {
+	const ownerLabel = "infra-uid"
+	testSubnet, nodeCIDR := f.allocateTestSubnet(ctx, t, defaultNodeCIDRPrefixLength)
+	zones := splitNodeCIDRToZones(t, nodeCIDR, []string{*zone})
+	infraName := fmt.Sprintf("sn-infra-%s-%s", *commitHash, rand.String(5))
+
+	newInfra := func(namespace, saSecretName string) *extensionsv1alpha1.Infrastructure {
+		return &extensionsv1alpha1.Infrastructure{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      infraName,
+				Namespace: namespace,
+			},
+			Spec: extensionsv1alpha1.InfrastructureSpec{
+				DefaultSpec: extensionsv1alpha1.DefaultSpec{
+					Type: "gdch",
+					ProviderConfig: &runtime.RawExtension{
+						Raw: encode(t, &v1alpha1.InfrastructureConfig{
+							Networks: v1alpha1.NetworkConfig{
+								ParentReference: &v1alpha1.SubnetReference{
+									Name:      testSubnet.Name,
+									Namespace: ptr.To(testSubnet.Namespace),
+									Type:      "SingleSubnet",
+								},
+								NodeCIDR: nodeCIDR,
+								Zones:    zones,
+							},
+						}),
+					},
+				},
+				SecretRef: corev1.SecretReference{
+					Name:      saSecretName,
+					Namespace: namespace,
+				},
+			},
+		}
+	}
+	waitForInfra := func(infra *extensionsv1alpha1.Infrastructure, description string, done func(*extensionsv1alpha1.Infrastructure) bool) {
+		t.Helper()
+		infraList := &extensionsv1alpha1.InfrastructureList{}
+		listOptions := []client.ListOption{
+			client.InNamespace(infra.Namespace),
+			client.MatchingFields{"metadata.name": infra.Name},
+		}
+		if err := kubernetes.WaitForCondition[*extensionsv1alpha1.Infrastructure](ctx, infraTimeout, func() (watch.Interface, error) {
+			return f.vucClient.Watch(ctx, infraList, listOptions...)
+		}, func(obj *extensionsv1alpha1.Infrastructure) bool {
+			t.Logf("Waiting for %q in %q, LastError: %q",
+				obj.Name, obj.Namespace,
+				ptr.Deref(obj.Status.LastError, gardencorev1beta1.LastError{}).Description)
+			return done(obj)
+		}); err != nil {
+			t.Fatalf("Infrastructure %s/%s did not reach the expected state (%s) in %d minutes: %v", infra.Namespace, infra.Name, description, int(infraTimeout.Minutes()), err)
+		}
+	}
+
+	// Arrange: the first Infrastructure owns the subnets.
+	owner := newInfra(namespace, saSecretName)
+	if err := f.vucClient.Create(ctx, owner); err != nil {
+		t.Fatalf("cannot create infrastructure object %v", err)
+	}
+	// Registered before the cleanup of the Infrastructure, so it runs after it: once the
+	// owner is deleted its subnets have to go away.
+	t.Cleanup(func() {
+		if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
+			err := f.globalClient.Get(ctx, client.ObjectKey{Name: infraName, Namespace: f.project}, &ipamglobalv1.Subnet{})
+			return apierrors.IsNotFound(err), nil
+		}); err != nil {
+			t.Errorf("root subnet %s still exists after its Infrastructure was deleted: %v", infraName, err)
+		}
+	})
+	t.Cleanup(func() { f.cleanupInfraCR(ctx, t, owner) })
+	waitForInfra(owner, "Succeeded", func(obj *extensionsv1alpha1.Infrastructure) bool {
+		return ptr.Deref(obj.Status.LastOperation, gardencorev1beta1.LastOperation{}).State == gardencorev1beta1.LastOperationStateSucceeded
+	})
+	if err := f.vucClient.Get(ctx, client.ObjectKeyFromObject(owner), owner); err != nil {
+		t.Fatalf("cannot get infrastructure object %v", err)
+	}
+
+	before, err := f.getInfraSubnets(ctx, infraName)
+	if err != nil {
+		t.Fatalf("cannot read the subnets of the first Infrastructure: %v", err)
+	}
+	// Assert: the subnets the extension creates carry the UID of their Infrastructure.
+	for name, labels := range map[string]map[string]string{
+		before.root.Name:               before.root.Labels,
+		before.zone.Name:               before.zone.Labels,
+		"zonal " + before.network.Name: before.network.Labels,
+	} {
+		if labels[ownerLabel] != string(owner.UID) {
+			t.Errorf("subnet %s has label %s=%q, want the UID of its Infrastructure %q", name, ownerLabel, labels[ownerLabel], owner.UID)
+		}
+	}
+	t.Logf("Propagated zone subnet %s: labels %v, annotations %v", before.propagated.Name, before.propagated.Labels, before.propagated.Annotations)
+
+	// Action: a second Infrastructure with the same name in another shoot namespace.
+	duplicate := newInfra(otherNamespace, otherSASecretName)
+	if err := f.vucClient.Create(ctx, duplicate); err != nil {
+		t.Fatalf("cannot create second infrastructure object %v", err)
+	}
+	t.Cleanup(func() { f.cleanupInfraCR(ctx, t, duplicate) })
+
+	// Assert: it cannot take over the subnets of the first one.
+	waitForInfra(duplicate, "error about the occupied root subnet", func(obj *extensionsv1alpha1.Infrastructure) bool {
+		return strings.Contains(ptr.Deref(obj.Status.LastError, gardencorev1beta1.LastError{}).Description, "occupied by another shoot")
+	})
+
+	// Action: delete the second Infrastructure.
+	f.cleanupInfraCR(ctx, t, duplicate)
+
+	// Assert: the subnets of the first Infrastructure are the same objects as before and
+	// are not being deleted.
+	after, err := f.getInfraSubnets(ctx, infraName)
+	if err != nil {
+		t.Fatalf("subnets of the first Infrastructure are missing after the second one was deleted: %v", err)
+	}
+	for _, subnet := range []struct {
+		name          string
+		before, after metav1.Object
+		ready         bool
+	}{
+		{"root subnet " + after.root.Name, before.root, after.root, isSubnetReady(after.root.Status.Conditions)},
+		{"zone subnet " + after.zone.Name, before.zone, after.zone, isSubnetReady(after.zone.Status.Conditions)},
+		{"propagated zone subnet " + after.propagated.Name, before.propagated, after.propagated, isSubnetReady(after.propagated.Status.Conditions)},
+		{"network subnet " + after.network.Name, before.network, after.network, isSubnetReady(after.network.Status.Conditions)},
+	} {
+		if subnet.after.GetUID() != subnet.before.GetUID() {
+			t.Errorf("%s was recreated: UID %s, was %s", subnet.name, subnet.after.GetUID(), subnet.before.GetUID())
+		}
+		if subnet.after.GetDeletionTimestamp() != nil {
+			t.Errorf("%s is being deleted", subnet.name)
+		}
+		if !subnet.ready {
+			t.Errorf("%s is not Ready", subnet.name)
+		}
+	}
+
+	// Action: remove the owner labels from the zone and network subnets, which is the state
+	// of subnets created before the labels were introduced, and reconcile the first
+	// Infrastructure again.
+	zoneSubnetPatch := client.MergeFrom(after.zone.DeepCopy())
+	delete(after.zone.Labels, ownerLabel)
+	networkSubnetPatch := client.MergeFrom(after.network.DeepCopy())
+	delete(after.network.Labels, ownerLabel)
+	// Removing the labels needs the permission to patch subnets, which the extension also
+	// uses to label them. Without it this part of the case cannot run.
+	if err := f.globalClient.Patch(ctx, after.zone, zoneSubnetPatch); err != nil {
+		if apierrors.IsForbidden(err) {
+			t.Logf("Skipping the relabelling check: not allowed to patch subnets in the global API: %v", err)
+			return
+		}
+		t.Fatalf("cannot remove label %s from zone subnet %s: %v", ownerLabel, after.zone.Name, err)
+	}
+	if err := f.mgmtClient.Patch(ctx, after.network, networkSubnetPatch); err != nil {
+		if apierrors.IsForbidden(err) {
+			t.Logf("Skipping the relabelling check: not allowed to patch subnets in the zonal API: %v", err)
+			return
+		}
+		t.Fatalf("cannot remove label %s from network subnet %s: %v", ownerLabel, after.network.Name, err)
+	}
+	ownerPatch := client.MergeFrom(owner.DeepCopy())
+	if owner.Annotations == nil {
+		owner.Annotations = map[string]string{}
+	}
+	owner.Annotations["gardener.cloud/operation"] = "reconcile"
+	if err := f.vucClient.Patch(ctx, owner, ownerPatch); err != nil {
+		t.Fatalf("cannot trigger a reconciliation of infrastructure %s/%s: %v", owner.Namespace, owner.Name, err)
+	}
+
+	// Assert: the Infrastructure takes its unlabelled subnets over again.
+	if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+		relabelled, err := f.getInfraSubnets(ctx, infraName)
+		if err != nil {
+			t.Logf("Waiting for the subnets of %s: %v", infraName, err)
+			return false, nil
+		}
+		return relabelled.zone.Labels[ownerLabel] == string(owner.UID) && relabelled.network.Labels[ownerLabel] == string(owner.UID), nil
+	}); err != nil {
+		t.Errorf("zone and network subnets of %s were not labelled with their owner again: %v", infraName, err)
 	}
 }
 

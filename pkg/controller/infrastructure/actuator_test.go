@@ -235,10 +235,21 @@ var (
 			},
 		},
 	}
+	// The copy of the global zone subnet that GDC propagates into the zone.
 	zTestInfraZone1ParentSubnet = &ipamv1.Subnet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-infrastructure-zone1",
 			Namespace: "test-project",
+			Annotations: map[string]string{
+				ipamv1.CreationOriginAnnotation: string(ipamv1.GlobalOrg),
+			},
+		},
+		Spec: ipamv1.SubnetSpec{
+			Type: ipamv1.Branch,
+			ParentReference: &ipamv1.SubnetReference{
+				Name:      "test-infrastructure",
+				Namespace: ptr.To("test-project"),
+			},
 		},
 		Status: ipamv1.SubnetStatus{
 			Conditions: []metav1.Condition{
@@ -250,10 +261,21 @@ var (
 		},
 	}
 
+	// The copy of the global zone subnet that GDC propagates into the zone.
 	zTestInfraZone2ParentSubnet = &ipamv1.Subnet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-infrastructure-zone2",
 			Namespace: "test-project",
+			Annotations: map[string]string{
+				ipamv1.CreationOriginAnnotation: string(ipamv1.GlobalOrg),
+			},
+		},
+		Spec: ipamv1.SubnetSpec{
+			Type: ipamv1.Branch,
+			ParentReference: &ipamv1.SubnetReference{
+				Name:      "test-infrastructure",
+				Namespace: ptr.To("test-project"),
+			},
 		},
 		Status: ipamv1.SubnetStatus{
 			Conditions: []metav1.Condition{
@@ -1760,6 +1782,24 @@ func Test_Delete(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The subnets of these fixtures were created for the Infrastructure under test.
+			// Test_Delete_SubnetOwnership covers subnets that belong to someone else.
+			tt.infra.UID = types.UID(infraUID)
+			for _, objects := range [][]client.Object{tt.globalObjects, tt.zone1Objects, tt.zone2Objects} {
+				for _, obj := range objects {
+					obj.SetLabels(map[string]string{infraUIDLabel: infraUID})
+				}
+			}
+			// The zonal subnets called "<infrastructure>-<zone>" are the copies of the zone
+			// subnets that GDC propagates into the zones. GDC records where they came from.
+			for zone, objects := range map[string][]client.Object{"zone1": tt.zone1Objects, "zone2": tt.zone2Objects} {
+				for _, obj := range objects {
+					if subnet, ok := obj.(*ipamv1.Subnet); ok && subnet.Name == tt.infra.Name+"-"+zone {
+						subnet.Annotations = map[string]string{ipamv1.CreationOriginAnnotation: string(ipamv1.GlobalOrg)}
+						subnet.Spec.ParentReference = &ipamv1.SubnetReference{Name: tt.infra.Name, Namespace: ptr.To(subnet.Namespace)}
+					}
+				}
+			}
 			allObjects := append(tt.objects, tt.infra)
 			c := createFakeClient(t, allObjects, tt.infra)
 			globalFakeClient := createFakeClient(t, tt.globalObjects, tt.infra)
