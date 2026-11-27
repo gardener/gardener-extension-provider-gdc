@@ -19,6 +19,7 @@ import (
 
 	extensionswebhook "github.com/gardener/gardener/extensions/pkg/webhook"
 	"github.com/gardener/gardener/pkg/apis/core"
+	gardensecurity "github.com/gardener/gardener/pkg/apis/security"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,6 +46,8 @@ func New(mgr manager.Manager) (*extensionswebhook.Webhook, error) {
 			NewCloudProfileValidator(mgr):           {{Obj: &core.CloudProfile{}}},
 			NewBackupBucketValidator(mgr):           {{Obj: &core.Seed{}}},
 			NewNamespacedCloudProfileValidator(mgr): {{Obj: &core.NamespacedCloudProfile{}}},
+			NewSecretBindingValidator(mgr):          {{Obj: &core.SecretBinding{}}}, //nolint:staticcheck // SA1019: SecretBinding remains supported alongside CredentialsBinding.
+			NewCredentialsBindingValidator(mgr):     {{Obj: &gardensecurity.CredentialsBinding{}}},
 		},
 		Target: extensionswebhook.TargetSeed,
 		ObjectSelector: &metav1.LabelSelector{

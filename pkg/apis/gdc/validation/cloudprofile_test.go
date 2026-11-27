@@ -437,6 +437,36 @@ func TestValidateCloudProfileConfig_Errors(t *testing.T) {
 			allowedRegions: allowedRegions,
 			wantErrors:     []string{"orgConfig.caData"},
 		},
+		{
+			name: "orgConfig - injection characters in endpoints, registryURL, and caData",
+			cloudProfileConfig: &apisgdc.CloudProfileConfig{
+				MachineImages: []apisgdc.MachineImages{
+					{Name: "img", Versions: []apisgdc.MachineImageVersion{{Version: "1.0", Image: "img", Architecture: ptr.To("amd64")}}},
+				},
+				OrgConfig: &apisgdc.OrgConfig{
+					GlobalManagementAPI: "https://global\ninjected=true",
+					Zones: []*apisgdc.ZoneEndpoints{{
+						Name:              "test-region-1-zone-1",
+						ManagementAPI:     "https://mgmt\"injected",
+						InfrastructureAPI: "https://infra\tinjected",
+					}},
+					RegistryURL: "harbor.example.com\"\n[plugins]",
+					CAData:      "ca-data\n[injected]",
+				},
+			},
+			machineImages: []core.MachineImage{
+				{Name: "img", Versions: []core.MachineImageVersion{{ExpirableVersion: core.ExpirableVersion{Version: "1.0"}}}},
+			},
+			allowedRegions: allowedRegions,
+			wantErrors: []string{
+				"orgConfig.globalManagementAPI",
+				"orgConfig.zones[0].managementAPI",
+				"orgConfig.zones[0].infrastructureAPI",
+				"orgConfig.registryURL",
+				"orgConfig.registryURL",
+				"orgConfig.caData",
+			},
+		},
 	}
 
 	for _, tt := range tests {

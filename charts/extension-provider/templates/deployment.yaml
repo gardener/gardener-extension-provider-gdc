@@ -58,10 +58,22 @@ spec:
       priorityClassName: gardener-system-900
       {{- end }}
       serviceAccountName: {{ include "name" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: {{ include "name" . }}
         image: {{ include "image" . }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         command:
         - /extension-provider
         - --config-file=/etc/{{ include "name" . }}/config/config.yaml
@@ -125,6 +137,9 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /etc/{{ include "name" . }}/config
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
         {{- if .Values.imageVectorOverwrite }}
         - name: imagevector-overwrite
           mountPath: /charts_overwrite/
@@ -145,6 +160,8 @@ spec:
         configMap:
           name: {{ include "name" . }}-configmap
           defaultMode: 420
+      - name: tmp
+        emptyDir: {}
       {{- if .Values.imageVectorOverwrite }}
       - name: imagevector-overwrite
         configMap:

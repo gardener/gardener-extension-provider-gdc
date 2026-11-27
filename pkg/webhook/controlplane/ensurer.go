@@ -82,9 +82,35 @@ func (e *ensurer) EnsureMachineControllerManagerDeployment(ctx context.Context, 
 		return fmt.Errorf("failed reading Cluster: %w", err)
 	}
 
+	sidecar := machinecontrollermanager.ProviderSidecarContainer(cluster.Shoot, newObj.Namespace, gdc.ProviderName, image.String())
+	if sidecar.SecurityContext == nil {
+		sidecar.SecurityContext = &corev1.SecurityContext{}
+	}
+	sidecar.SecurityContext.AllowPrivilegeEscalation = ptr.To(false)
+	sidecar.SecurityContext.RunAsNonRoot = ptr.To(true)
+	sidecar.SecurityContext.RunAsUser = ptr.To[int64](65532)
+	sidecar.SecurityContext.RunAsGroup = ptr.To[int64](65532)
+	sidecar.SecurityContext.ReadOnlyRootFilesystem = ptr.To(true)
+	sidecar.SecurityContext.Capabilities = &corev1.Capabilities{
+		Drop: []corev1.Capability{"ALL"},
+	}
+	sidecar.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
+		Type: corev1.SeccompProfileTypeRuntimeDefault,
+	}
+	sidecar.VolumeMounts = webhook.EnsureVolumeMountWithName(sidecar.VolumeMounts, corev1.VolumeMount{
+		Name:      "tmp",
+		MountPath: "/tmp",
+	})
+	newObj.Spec.Template.Spec.Volumes = webhook.EnsureVolumeWithName(newObj.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+
 	newObj.Spec.Template.Spec.Containers = webhook.EnsureContainerWithName(
 		newObj.Spec.Template.Spec.Containers,
-		machinecontrollermanager.ProviderSidecarContainer(cluster.Shoot, newObj.Namespace, gdc.ProviderName, image.String()),
+		sidecar,
 	)
 	return nil
 }

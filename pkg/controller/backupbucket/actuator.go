@@ -180,8 +180,9 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// If the configs are not found, we can't delete the bucket anyway.
-			// We will treat this as a success to avoid the deletion getting stuck.
-			return nil
+			// We will treat this as a success to avoid the deletion getting stuck, but still
+			// remove the generated secret: it holds credentials and only needs the seed client.
+			return a.deleteGeneratedSecret(ctx, backupBucket.Name)
 		}
 		return fmt.Errorf("failed to get client and config while deleting backup bucket %s: %w", backupBucket.Name, err)
 	}
@@ -211,7 +212,12 @@ func (a *actuator) Delete(ctx context.Context, _ logr.Logger, backupBucket *exte
 		}
 	}
 
-	secretName := getGeneratedSecretName(backupBucket.Name)
+	return a.deleteGeneratedSecret(ctx, backupBucket.Name)
+}
+
+// deleteGeneratedSecret removes the generated backup credential secret from the seed cluster.
+func (a *actuator) deleteGeneratedSecret(ctx context.Context, bucketName string) error {
+	secretName := getGeneratedSecretName(bucketName)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,

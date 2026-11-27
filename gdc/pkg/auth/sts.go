@@ -35,6 +35,9 @@ const (
 	tokenExchangeType       = "urn:ietf:params:oauth:token-type:token-exchange"
 	accessTokenType         = "urn:ietf:params:oauth:token-type:access_token"
 	serviceAccountTokenType = "urn:k8s:params:oauth:token-type:serviceaccount"
+
+	maxSTSResponseBytes  = 1 << 20 // 1 MiB
+	maxSTSErrorBodyBytes = 4 << 10 // 4 KiB
 )
 
 type Option func(*optionalConfig)
@@ -76,10 +79,18 @@ func NewSTSTokenSource(
 	jwtTS := newJWTTokenSource(saConfig)
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if tr.TLSClientConfig == nil {
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else if tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+		tr.TLSClientConfig.MinVersion = tls.VersionTLS12
+	}
 	if len(cfg.caCert) != 0 {
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(cfg.caCert)
-		tr.TLSClientConfig = &tls.Config{RootCAs: caCertPool}
+		tr.TLSClientConfig = &tls.Config{
+			RootCAs:    caCertPool,
+			MinVersion: tls.VersionTLS12,
+		}
 	}
 
 	return &stsTokenSource{
@@ -154,16 +165,20 @@ func (ts *stsTokenSource) Token() (*oauth2.Token, error) {
 			return fmt.Errorf("fetch token: %w", doErr)
 		}
 		var readErr error
-		respBody, readErr = io.ReadAll(resp.Body)
+		respBody, readErr = io.ReadAll(io.LimitReader(resp.Body, maxSTSResponseBytes))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("read fetched token: %w", readErr)
 		}
 		if resp.StatusCode >= http.StatusInternalServerError {
 			// Retry on HTTP 5xx server errors; 4xx client errors do not retry.
+			errBody := respBody
+			if len(errBody) > maxSTSErrorBodyBytes {
+				errBody = errBody[:maxSTSErrorBodyBytes]
+			}
 			return &oauth2.RetrieveError{
 				Response: resp,
-				Body:     respBody,
+				Body:     errBody,
 			}
 		}
 		return nil
@@ -173,9 +188,13 @@ func (ts *stsTokenSource) Token() (*oauth2.Token, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		errBody := respBody
+		if len(errBody) > maxSTSErrorBodyBytes {
+			errBody = errBody[:maxSTSErrorBodyBytes]
+		}
 		return nil, &oauth2.RetrieveError{
 			Response: resp,
-			Body:     respBody,
+			Body:     errBody,
 		}
 	}
 

@@ -16,17 +16,17 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cloud-provider-config
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
 data:
   cloudprovider.conf: |
     [Global]
-    project="{{ .Values.project }}"
-    region="{{ .Values.region }}"
-    global-management-server-url="{{ .Values.globalManagementServerURL }}"
-    ca="{{ .Values.caData }}"
+    project={{ .Values.project | quote }}
+    region={{ .Values.region | quote }}
+    global-management-server-url={{ .Values.globalManagementServerURL | quote }}
+    ca={{ .Values.caData | quote }}
 
     {{- range $index, $zone := .Values.zones }}
     [zone_{{ $index }}]
-    name="{{ $zone.name }}"
-    management-api="{{ $zone.managementAPI }}"
+    name={{ $zone.name | quote }}
+    management-api={{ $zone.managementAPI | quote }}
     {{- end }}

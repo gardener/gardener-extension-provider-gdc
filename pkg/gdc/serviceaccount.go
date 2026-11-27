@@ -20,6 +20,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"unicode"
 
@@ -125,5 +127,38 @@ func getServiceAccountFromJSON(data []byte) (*auth.ServiceAccount, error) {
 		}
 	}
 
+	if serviceAccount.TokenURI != "" {
+		if err := validateTokenURI(serviceAccount.TokenURI); err != nil {
+			return nil, err
+		}
+	}
+
 	return serviceAccount, nil
+}
+
+func validateTokenURI(rawURI string) error {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return fmt.Errorf("invalid service account token_uri")
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("service account token_uri must use https scheme")
+	}
+	host := parsed.Hostname()
+	if parsed.Host == "" || host == "" {
+		return fmt.Errorf("service account token_uri must specify a host")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("service account token_uri must not contain userinfo or fragment")
+	}
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") {
+		return fmt.Errorf("service account token_uri must not target localhost")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("service account token_uri must not target loopback, link-local, or unspecified IP addresses")
+		}
+	}
+	return nil
 }

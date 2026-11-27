@@ -186,7 +186,16 @@ func (s *shoot) validateNodeCIDRNotOverlap(ctx context.Context, infrastructureCo
 		if otherInfraConfig != nil {
 			_, otherCIDR, _ := net.ParseCIDR(otherInfraConfig.Networks.NodeCIDR)
 			if cidrOverlap(otherCIDR, currentNodeCIDR) {
-				detail := fmt.Sprintf("NodeCIDR \"%s\" overlaps with the nodeCIDR \"%s\" of shoot with name \"%q\"", currentNodeCIDR.String(), otherCIDR.String(), otherShoot.Name)
+				// Shoots in other namespaces belong to other projects: do not disclose their names or
+				// node ranges to the requester. The details are logged for operators instead.
+				detail := fmt.Sprintf("NodeCIDR \"%s\" overlaps with the nodeCIDR of another shoot using the same cloud profile", currentNodeCIDR.String())
+				if otherShoot.Namespace == shoot.Namespace {
+					detail = fmt.Sprintf("NodeCIDR \"%s\" overlaps with the nodeCIDR \"%s\" of shoot with name \"%q\"", currentNodeCIDR.String(), otherCIDR.String(), otherShoot.Name)
+				} else {
+					logger.Info("Rejecting shoot because its NodeCIDR overlaps with a shoot in another namespace",
+						"shoot", client.ObjectKey{Namespace: shoot.Namespace, Name: shoot.Name}.String(), "nodeCIDR", currentNodeCIDR.String(),
+						"otherShoot", client.ObjectKey{Namespace: otherShoot.Namespace, Name: otherShoot.Name}.String(), "otherNodeCIDR", otherCIDR.String())
+				}
 				return field.Invalid(infrastructureConfigPath.Child("nodecidr"), currentNodeCIDR.String(), detail)
 			}
 		}

@@ -61,7 +61,7 @@ providerSpec:
   machineType: {{ $machineClass.machineType | quote }}
 {{- if $machineClass.annotations }}
   annotations:
-{{ toYaml $machineClass.annotations | indent 2 }}
+{{ toYaml $machineClass.annotations | indent 4 }}
 {{- end }}
 secretRef:
   name: {{ $machineClass.name | quote }}
